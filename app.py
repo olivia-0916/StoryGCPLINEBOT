@@ -39,6 +39,9 @@ firebase_cred = get_firebase_credentials_from_env()
 firebase_admin.initialize_app(firebase_cred)
 db = firestore.client()
 
+# ====== 儲存會話狀態 ======
+user_sessions = {}
+
 # ====== 首頁測試路由 ======
 @app.route("/")
 def index():
@@ -81,7 +84,7 @@ def handle_message(event):
             "updated_at": firestore.SERVER_TIMESTAMP
         }, merge=True)
 
-        # === 處理圖片訊息 ===
+        # === 檢查並處理圖片訊息 ===
         if user_text.startswith(("請畫", "畫出", "幫我畫")):
             prompt = user_text
             for key in ["請畫", "畫出", "幫我畫"]:
@@ -117,12 +120,8 @@ def handle_message(event):
             print("⚠️ 重複文字訊息，跳過處理")
             return
 
-        # === 呼叫 OpenAI 取得回應 ===
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": user_text}]
-        )
-        assistant_reply = response["choices"][0]["message"]["content"]
+        # === 根據用戶會話處理訊息並取得回應 ===
+        assistant_reply = get_openai_response(user_id, user_text)
 
         # === 回傳訊息到 LINE ===
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
@@ -147,6 +146,36 @@ def handle_message(event):
         print("⚠️ 發生未知錯誤：", e)
         traceback.print_exc()
         line_bot_api.reply_message(reply_token, TextSendMessage(text="我剛剛迷路了 😢 可以再試一次嗎？"))
+
+# ====== 根據用戶ID獲取 OpenAI 回應 ======
+def get_openai_response(user_id, user_message):
+    # 檢查是否已有該用戶的會話狀態
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            "system_prompt": "你是一位親切、有耐心且擅長說故事的 AI 夥伴，名字叫 小頁。你正在協助一位 50 歲以上的長輩，共同創作一則屬於他/她的故事繪本",
+            "first_interaction": True
+        }
+    
+    # 根據用戶的會話狀態來決定是否傳送 system prompt
+    session = user_sessions[user_id]
+    if session["first_interaction"]:
+        messages = [
+            {"role": "system", "content": session["system_prompt"]},
+            {"role": "user", "content": user_message}
+        ]
+        session["first_interaction"] = False  # 設置為非第一次對話
+    else:
+        messages = [
+            {"role": "user", "content": user_message}
+        ]
+    
+    # 呼叫 OpenAI API
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",  # 使用 gpt-3.5 模型
+        messages=messages
+    )
+    
+    return response.choices[0].message['content']
 
 # ====== 運行應用程式 ======
 if __name__ == "__main__":
