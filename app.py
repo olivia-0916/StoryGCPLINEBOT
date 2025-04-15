@@ -21,7 +21,7 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS")  # 一整段 JSON 字串
+FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS")  # 一整段 JSON 字串
 
 # 初始化 LINE / OpenAI
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -30,7 +30,7 @@ openai.api_key = OPENAI_API_KEY
 
 # ====== Firebase 初始化（從環境變數 JSON）======
 def get_firebase_credentials_from_env():
-    service_account_info = json.loads(FIREBASE_CREDENTIALS_JSON)
+    service_account_info = json.loads(FIREBASE_CREDENTIALS)
     print("✅ 成功從環境變數讀取 Firebase 金鑰")
     return credentials.Certificate(service_account_info)
 
