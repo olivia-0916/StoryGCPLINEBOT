@@ -127,7 +127,7 @@ def get_openai_response(user_id, user_message):
 
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",
             messages=messages,
             max_tokens=60,# 大約 35 中文字（1 字 ≈ 2 tokens），可視狀況再微調
             temperature=0.7  # 可選，加一點變化性
