@@ -107,7 +107,7 @@ def handle_message(event):
     # 否則處理為 GPT 對話
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4",
+            model="gpt-3.5-turbo",
             messages=[
                 {
                     "role": "system",
