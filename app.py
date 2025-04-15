@@ -162,7 +162,6 @@ def handle_message(event):
             ],
             max_tokens=200,
             timeout=20,
-            max_retries=1
         )
 
         reply_text = chat_response['choices'][0]['message']['content'].strip()
