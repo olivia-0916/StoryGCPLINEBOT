@@ -7,20 +7,31 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import openai
 
+# Firebase
+import firebase_admin
+from firebase_admin import credentials, firestore
+
 # 解決中文錯誤訊息編碼問題
 sys.stdout.reconfigure(encoding='utf-8')
 
 app = Flask(__name__)
 
-# 讀取環境變數
+# 環境變數
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+FIREBASE_TOKEN_PATH = os.environ.get("FIREBASE_TOKEN")  # Firebase 憑證檔案路徑
 
-# 初始化 LINE 和 OpenAI
+# 初始化 LINE / OpenAI
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
+
+# 初始化 Firebase
+if not firebase_admin._apps:
+    cred = credentials.Certificate(FIREBASE_TOKEN_PATH)
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
 
 @app.route("/")
 def index():
@@ -39,11 +50,20 @@ def callback():
 
     return "OK"
 
-# 回覆使用者文字訊息（用 GPT，整合角色 prompt）
+# 處理訊息
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text
+    user_id = event.source.user_id
 
+    # 將 LINE User ID 寫入 Firestore（以使用者 ID 為文件 ID）
+    try:
+        doc_ref = db.collection("users").document(user_id)
+        doc_ref.set({"USERID": user_id})
+    except Exception as e:
+        print(f"⚠️ Firebase 寫入錯誤：{e}")
+
+    # 呼叫 GPT 回應使用者
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
@@ -114,11 +134,9 @@ def handle_message(event):
         reply_text = response['choices'][0]['message']['content'].strip()
 
     except Exception as e:
-        # 印出完整錯誤細節供除錯用
+        # 錯誤處理
         error_details = traceback.format_exc()
         print("⚠️ OpenAI API 發生錯誤：\n", error_details)
-
-        # 給使用者的友善回應
         reply_text = "小頁剛才有點迷路了，能再說一次看看嗎？😊"
 
     # 回覆 LINE 使用者
