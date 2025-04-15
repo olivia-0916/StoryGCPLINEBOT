@@ -200,11 +200,12 @@ def handle_message(event):
         )
 
     except Exception as e:
-        print("⚠️ OpenAI API 發生錯誤：", traceback.format_exc())
+        print("⚠️ OpenAI API 發生錯誤：", e)
+        traceback.print_exc()  # 這會把完整錯誤堆疊印出來到 GCP log
         line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text="小頁剛才有點迷路了，能再說一次看看嗎？😊")
-        )
+        reply_token,
+        TextSendMessage(text="小頁剛才有點迷路了，能再說一次看看嗎？😊")
+    )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
