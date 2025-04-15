@@ -83,18 +83,17 @@ def handle_message(event):
         # === 儲存對話到「單一 conversation 文件」 ===
         convo_ref = user_doc_ref.collection("messages").document("conversation")
 
-        # 若文件不存在，先建立空的 history 陣列
-        if not convo_ref.get().exists:
-            convo_ref.set({"history": []})
+        # 直接合併 history 陣列（如果文件不存在會自動建立）
+        convo_ref.set({
+        "history": firestore.ArrayUnion([{
+        "user": user_text,
+        "assistant": assistant_reply,
+        "timestamp": firestore.SERVER_TIMESTAMP
+                }])
+        }, merge=True)
 
-        # 加入新的訊息到 history 陣列中
-        convo_ref.update({
-            "history": firestore.ArrayUnion([{
-                "user": user_text,
-                "assistant": assistant_reply,
-                "timestamp": firestore.SERVER_TIMESTAMP
-            }])
-        })
+    
+
 
 # ====== GPT 回應邏輯 ======
 def get_openai_response(user_id, user_message):
