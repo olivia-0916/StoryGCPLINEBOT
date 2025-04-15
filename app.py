@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import time
 import traceback
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -21,12 +22,13 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS")  # JSON 字串格式
+FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS")
 
 # ====== 初始化 LINE / OpenAI ======
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
+assistant_id = "asst_ksQMWcb6hETgvdwTVsaq3NLU"
 
 # ====== Firebase 初始化 ======
 def get_firebase_credentials_from_env():
@@ -74,17 +76,17 @@ def handle_message(event):
             token_ref.set({"handled": True})  # 儲存為已處理
 
         # === 建立或更新使用者 ===
-        db.collection("users").document(user_id).set({"USERID": user_id}, merge=True)
+        user_doc = db.collection("users").document(user_id)
+        user_doc.set({"USERID": user_id}, merge=True)
 
-        # === 處理圖像訊息 ===
+        # === 處理圖片訊息 ===
         if user_text.startswith(("請畫", "畫出", "幫我畫")):
             prompt = user_text
             for key in ["請畫", "畫出", "幫我畫"]:
                 prompt = prompt.replace(key, "")
             prompt = prompt.strip()
 
-            # 查重圖片訊息
-            existing_img = db.collection("users").document(user_id).collection("messages")\
+            existing_img = user_doc.collection("messages")\
                 .where("type", "==", "image").where("content", "==", prompt).stream()
             if any(existing_img):
                 print("⚠️ 重複圖片 prompt，跳過儲存")
@@ -98,42 +100,66 @@ def handle_message(event):
                 ImageSendMessage(original_content_url=image_url, preview_image_url=image_url)
             )
 
-            db.collection("users").document(user_id).collection("messages").add({
+            user_doc.collection("messages").add({
                 "type": "image",
                 "content": prompt,
                 "image_url": image_url
             })
             return
 
-        # === 查重文字訊息 ===
-        existing_text = db.collection("users").document(user_id).collection("messages")\
+        # === 檢查是否重複文字訊息 ===
+        existing_text = user_doc.collection("messages")\
             .where("type", "==", "text").where("content", "==", user_text).stream()
         if any(existing_text):
             print("⚠️ 重複文字訊息，跳過處理")
             return
 
-        # === ChatGPT 對話 ===
-        chat_response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是小頁，一位親切溫柔的 AI 夥伴，正協助長輩創作故事繪本。請使用親切、鼓勵式語氣，每次回覆不超過 35 字，分段清楚。"
-                },
-                {"role": "user", "content": user_text}
-            ],
-            max_tokens=200,
-            timeout=20,
+        # === Assistant API：建立或取得 Thread ID ===
+        thread_meta_ref = user_doc.collection("meta").document("thread")
+        thread_doc = thread_meta_ref.get()
+
+        if thread_doc.exists:
+            thread_id = thread_doc.to_dict()["thread_id"]
+        else:
+            thread = openai.beta.threads.create()
+            thread_id = thread.id
+            thread_meta_ref.set({"thread_id": thread_id})
+
+        # === 新增訊息到 thread 並觸發 assistant 回覆 ===
+        openai.beta.threads.messages.create(
+            thread_id=thread_id,
+            role="user",
+            content=user_text
         )
 
-        reply_text = chat_response['choices'][0]['message']['content'].strip()
+        run = openai.beta.threads.runs.create(
+            thread_id=thread_id,
+            assistant_id=assistant_id
+        )
 
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text))
+        # === 等待 assistant 完成回應 ===
+        while True:
+            run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+            if run_status.status == "completed":
+                break
+            elif run_status.status in ["failed", "cancelled", "expired"]:
+                raise Exception(f"Assistant Run Failed: {run_status.status}")
+            time.sleep(1)
 
-        db.collection("users").document(user_id).collection("messages").add({
+        # === 取得 assistant 回覆訊息 ===
+        messages = openai.beta.threads.messages.list(thread_id=thread_id)
+        assistant_reply = next(
+            (msg.content[0].text.value for msg in reversed(messages.data) if msg.role == "assistant"),
+            "我剛剛迷路了 😢 可以再說一次嗎？"
+        )
+
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
+
+        # === 儲存對話紀錄 ===
+        user_doc.collection("messages").add({
             "type": "text",
             "content": user_text,
-            "reply": reply_text
+            "reply": assistant_reply
         })
 
     except openai.error.RateLimitError as e:
