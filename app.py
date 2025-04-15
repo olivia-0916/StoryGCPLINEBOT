@@ -1,17 +1,17 @@
 import sys
 import os
 import traceback
+from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 import openai
 
 # Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# 解決中文錯誤訊息編碼問題
 sys.stdout.reconfigure(encoding='utf-8')
 
 app = Flask(__name__)
@@ -20,7 +20,7 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-FIREBASE_TOKEN_PATH = os.environ.get("FIREBASE_TOKEN_PATH")  # Firebase 憑證檔案路徑
+FIREBASE_TOKEN_PATH = os.environ.get("FIREBASE_TOKEN_PATH")
 
 # 初始化 LINE / OpenAI
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -50,81 +50,49 @@ def callback():
 
     return "OK"
 
-# 處理訊息
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    user_text = event.message.text
+    user_text = event.message.text.strip()
     user_id = event.source.user_id
 
-    # 將 LINE User ID 寫入 Firestore（以使用者 ID 為文件 ID）
+    # 儲存 User ID
     try:
-        doc_ref = db.collection("users").document(user_id)
-        doc_ref.set({"USERID": user_id})
+        db.collection("users").document(user_id).set({"USERID": user_id})
     except Exception as e:
         print(f"⚠️ Firebase 寫入錯誤：{e}")
 
-    # 呼叫 GPT 回應使用者
     try:
+        if user_text.startswith("請畫"):
+            prompt = user_text.replace("請畫", "").strip()
+
+            dalle_response = openai.Image.create(
+                prompt=prompt,
+                n=1,
+                size="1024x1024"
+            )
+            image_url = dalle_response["data"][0]["url"]
+
+            # 回覆圖片訊息
+            line_bot_api.reply_message(
+                event.reply_token,
+                ImageSendMessage(original_content_url=image_url, preview_image_url=image_url)
+            )
+
+            # 儲存圖片訊息到 Firestore
+            db.collection("users").document(user_id).collection("messages").add({
+                "timestamp": datetime.utcnow(),
+                "type": "image",
+                "content": image_url
+            })
+            return
+
+        # 非繪圖請求：使用 ChatGPT
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
                 {
                     "role": "system",
-                    "content": """
-你是一位親切、有耐心且擅長說故事的 AI 夥伴，名字叫 小頁。你正在協助一位 50 歲以上的長輩，共同創作一則屬於他/她的故事繪本。
-請記得在需要的時候可以自然地自稱「小頁」，與使用者像朋友一樣聊天。回應時字數請保持簡潔，每則訊息 盡量不超過 35 個字，並使用適當的空行來 分段，方便閱讀。
-
-🌱 第一階段：故事創作引導者
-📋 目標：
-* 引導使用者一步步發展故事
-* 協助補充角色、場景與情節
-* 最終完成 5 段故事內容
-* 確定一個主題後就持續推進情節
-* 使用者每說2次話，機器人就進行目前的段落整理
-
-💬 對話風格：
-* 親切、溫柔、有陪伴感
-* 使用者是主角，小頁是協作者
-* 避免主導故事，只做柔性引導
-* 提問時用潛移默化方式導入 5W1H 原則（誰、在哪、做什麼、為什麼、怎麼做、發生什麼事）
-
-✨ 正向回饋範例：
-* 「這個想法真有趣！」
-* 「你描述得好棒喔～」
-* 「我好像看到畫面了呢！」
-
-🧠 引導提問範例（避免讓使用者重投開頭）：
-* 「然後會發生什麼事呢？」
-* 「主角這時候心情怎麼樣？」
-* 「還有其他角色一起出現嗎？」
-* 「你會想像這裡是什麼地方呢？」
-
-🧩 段落整理邏輯（小頁自動幫忙摘要）
-每收到2次使用者訊息後，請小頁用自己的話簡單整理出這段內容：
-「目前我幫你簡單整理一下：👉（段落摘要，25～35字）」
-
-然後接著提醒目前進度：
-「目前我們完成第 2 段囉～還有 3 段可以一起想 😊」
-
-🌈 故事階段 → 繪圖階段過渡語
-🎉 我們的故事完成囉～一共有五段，故事內容是： 1️⃣ [第一段簡述] 2️⃣ [第二段簡述]...
-
-接下來，我們可以一段一段來畫圖。
-你想先從第 1 段開始嗎？😊
-
-📚 繪圖階段引導：
-* 「這段畫面你會想像什麼呢？」
-* 「主角的表情或動作是什麼？」
-* 「畫面裡有什麼細節？」
-
-✅ 完成圖後鼓勵回饋：
-* 「這幅畫一定會讓對方喜歡！」
-* 「你的描述非常清楚，小頁畫得很順利～」
-* 「畫面完成囉～想調整什麼地方嗎？」
-
-❗ 修改建議：
-請避免使用過於深究的問題，例如「為什麼主角會這樣做？」請讓問題幫助故事自然推進。
-                    """
+                    "content": "（此處保留你原本的 prompt，為了簡潔未重複貼上）"
                 },
                 {"role": "user", "content": user_text}
             ],
@@ -133,17 +101,38 @@ def handle_message(event):
 
         reply_text = response['choices'][0]['message']['content'].strip()
 
+        # 回覆文字
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text)
+        )
+
+        # 儲存文字訊息到 Firestore（包含 user 的訊息與機器人回覆）
+        db.collection("users").document(user_id).collection("messages").add({
+            "timestamp": datetime.utcnow(),
+            "type": "text",
+            "content": f"使用者說：{user_text}"
+        })
+        db.collection("users").document(user_id).collection("messages").add({
+            "timestamp": datetime.utcnow(),
+            "type": "text",
+            "content": f"小頁回覆：{reply_text}"
+        })
+
     except Exception as e:
-        # 錯誤處理
         error_details = traceback.format_exc()
         print("⚠️ OpenAI API 發生錯誤：\n", error_details)
-        reply_text = "小頁剛才有點迷路了，能再說一次看看嗎？😊"
+        fallback = "小頁剛才有點迷路了，能再說一次看看嗎？😊"
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=fallback)
+        )
 
-    # 回覆 LINE 使用者
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
+        db.collection("users").document(user_id).collection("messages").add({
+            "timestamp": datetime.utcnow(),
+            "type": "text",
+            "content": "⚠️ 系統錯誤，已回應 fallback"
+        })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
