@@ -28,7 +28,6 @@ FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
-assistant_id = "asst_ksQMWcb6hETgvdwTVsaq3NLU"
 
 # ====== Firebase 初始化 ======
 def get_firebase_credentials_from_env():
@@ -73,11 +72,14 @@ def handle_message(event):
             print("⚠️ 已處理過此 reply_token，跳過。")
             return
         else:
-            token_ref.set({"handled": True})  # 儲存為已處理
+            token_ref.set({"handled": True})
 
         # === 建立或更新使用者 ===
         user_doc = db.collection("users").document(user_id)
-        user_doc.set({"USERID": user_id}, merge=True)
+        user_doc.set({
+            "USERID": user_id,
+            "updated_at": firestore.SERVER_TIMESTAMP
+        }, merge=True)
 
         # === 處理圖片訊息 ===
         if user_text.startswith(("請畫", "畫出", "幫我畫")):
@@ -103,7 +105,8 @@ def handle_message(event):
             user_doc.collection("messages").add({
                 "type": "image",
                 "content": prompt,
-                "image_url": image_url
+                "image_url": image_url,
+                "timestamp": firestore.SERVER_TIMESTAMP
             })
             return
 
@@ -114,52 +117,22 @@ def handle_message(event):
             print("⚠️ 重複文字訊息，跳過處理")
             return
 
-        # === Assistant API：建立或取得 Thread ID ===
-        thread_meta_ref = user_doc.collection("meta").document("thread")
-        thread_doc = thread_meta_ref.get()
-
-        if thread_doc.exists:
-            thread_id = thread_doc.to_dict()["thread_id"]
-        else:
-            thread = openai.beta.threads.create()
-            thread_id = thread.id
-            thread_meta_ref.set({"thread_id": thread_id})
-
-        # === 新增訊息到 thread 並觸發 assistant 回覆 ===
-        openai.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=user_text
+        # === 呼叫 OpenAI 取得回應 ===
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": user_text}]
         )
+        assistant_reply = response["choices"][0]["message"]["content"]
 
-        run = openai.beta.threads.runs.create(
-            thread_id=thread_id,
-            assistant_id=assistant_id
-        )
-
-        # === 等待 assistant 完成回應 ===
-        while True:
-            run_status = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-            if run_status.status == "completed":
-                break
-            elif run_status.status in ["failed", "cancelled", "expired"]:
-                raise Exception(f"Assistant Run Failed: {run_status.status}")
-            time.sleep(1)
-
-        # === 取得 assistant 回覆訊息 ===
-        messages = openai.beta.threads.messages.list(thread_id=thread_id)
-        assistant_reply = next(
-            (msg.content[0].text.value for msg in reversed(messages.data) if msg.role == "assistant"),
-            "我剛剛迷路了 😢 可以再說一次嗎？"
-        )
-
+        # === 回傳訊息到 LINE ===
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
 
-        # === 儲存對話紀錄 ===
+        # === 儲存對話紀錄到 Firebase ===
         user_doc.collection("messages").add({
             "type": "text",
             "content": user_text,
-            "reply": assistant_reply
+            "reply": assistant_reply,
+            "timestamp": firestore.SERVER_TIMESTAMP
         })
 
     except openai.error.RateLimitError as e:
