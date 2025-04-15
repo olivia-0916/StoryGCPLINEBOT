@@ -20,7 +20,7 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-FIREBASE_TOKEN_PATH = os.environ.get("FIREBASE_TOKEN")  # Firebase 憑證檔案路徑
+FIREBASE_TOKEN_PATH = os.environ.get("FIREBASE_TOKEN_PATH")  # Firebase 憑證檔案路徑
 
 # 初始化 LINE / OpenAI
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
