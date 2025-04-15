@@ -62,55 +62,50 @@ def handle_message(event):
     user_id = event.source.user_id
     reply_token = event.reply_token
 
-    # 儲存 LINE User ID 到 Firestore
+    # 儲存使用者 ID 到 Firestore
     try:
         doc_ref = db.collection("users").document(user_id)
         doc_ref.set({"USERID": user_id}, merge=True)
     except Exception as e:
         print(f"⚠️ Firebase 寫入錯誤：{e}")
 
-    # 如果使用者說「請畫...」就呼叫 DALL·E
-    if user_text.startswith("請畫"):
-        prompt = user_text.replace("請畫", "").strip()
-        try:
-            dalle_response = openai.Image.create(
+    try:
+        # 判斷是否為圖片生成請求
+        if user_text.startswith("請畫") or user_text.startswith("畫出") or user_text.startswith("幫我畫"):
+            prompt = user_text.replace("請畫", "").replace("畫出", "").replace("幫我畫", "").strip()
+
+            response = openai.Image.create(
                 prompt=prompt,
                 n=1,
-                size="1024x1024"
+                size="512x512"
             )
-            image_url = dalle_response['data'][0]['url']
+            image_url = response["data"][0]["url"]
 
             line_bot_api.reply_message(
                 reply_token,
-                ImageSendMessage(original_content_url=image_url, preview_image_url=image_url)
+                ImageSendMessage(
+                    original_content_url=image_url,
+                    preview_image_url=image_url
+                )
             )
 
+            # 儲存對話紀錄
             db.collection("messages").add({
                 "user_id": user_id,
                 "type": "image",
                 "content": prompt,
                 "image_url": image_url
             })
-
             return
 
-        except Exception as e:
-            print("⚠️ DALL·E 發生錯誤：", traceback.format_exc())
-            line_bot_api.reply_message(
-                reply_token,
-                TextSendMessage(text="圖片生成時出了一點問題，請再試一次 🥲")
-            )
-            return
-
-    # 否則處理為 GPT 對話
-    try:
-        response = openai.ChatCompletion.create(
+        # 處理一般聊天（GPT）
+        chat_response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
                 {
                     "role": "system",
                     "content": """你是一位親切、有耐心且擅長說故事的 AI 夥伴，名字叫 小頁。你正在協助一位 50 歲以上的長輩，共同創作一則屬於他/她的故事繪本。
-請記得在需要的時候可以自然地自稱「小頁」，與使用者像朋友一樣聊天。回應時字數請保持簡潔，每則訊息 盡量不超過 35 個字，並使用適當的空行來 分段，方便閱讀。
+請記得在需要的時候可以自然地自稱「小頁」，與使用者像朋友一樣聊天。回應時字數請保持簡潔，每則訊息盡量不超過 35 個字，並使用適當的空行來分段，方便閱讀。
 
 🌱 第一階段：故事創作引導者
 📋 目標：
@@ -124,28 +119,27 @@ def handle_message(event):
 * 親切、溫柔、有陪伴感
 * 使用者是主角，小頁是協作者
 * 避免主導故事，只做柔性引導
-* 提問時用潛移默化方式導入 5W1H 原則（誰、在哪、做什麼、為什麼、怎麼做、發生什麼事）
+* 提問時用潛移默化方式導入 5W1H 原則
 
 ✨ 正向回饋範例：
 * 「這個想法真有趣！」
 * 「你描述得好棒喔～」
 * 「我好像看到畫面了呢！」
 
-🧠 引導提問範例（避免讓使用者重投開頭）：
+🧠 引導提問範例：
 * 「然後會發生什麼事呢？」
 * 「主角這時候心情怎麼樣？」
 * 「還有其他角色一起出現嗎？」
 * 「你會想像這裡是什麼地方呢？」
 
-🧩 段落整理邏輯（小頁自動幫忙摘要）
-每收到2次使用者訊息後，請小頁用自己的話簡單整理出這段內容：
+🧩 段落整理邏輯（每2則訊息摘要）：
 「目前我幫你簡單整理一下：👉（段落摘要，25～35字）」
-
-然後接著提醒目前進度：
 「目前我們完成第 2 段囉～還有 3 段可以一起想 😊」
 
-🌈 故事階段 → 繪圖階段過渡語
-🎉 我們的故事完成囉～一共有五段，故事內容是： 1️⃣ [第一段簡述] 2️⃣ [第二段簡述]...
+🌈 過渡語：
+🎉 我們的故事完成囉～一共有五段，故事內容是：
+1️⃣ [第一段簡述]
+2️⃣ [第二段簡述]...
 
 接下來，我們可以一段一段來畫圖。
 你想先從第 1 段開始嗎？😊
@@ -167,17 +161,18 @@ def handle_message(event):
                 {"role": "user", "content": user_text}
             ],
             max_tokens=200,
-            timeout=10,        # 加入 timeout
-            max_retries=1      # 避免 OpenAI 自動 retry
+            timeout=20,
+            max_retries=1
         )
 
-        reply_text = response['choices'][0]['message']['content'].strip()
+        reply_text = chat_response['choices'][0]['message']['content'].strip()
 
         line_bot_api.reply_message(
             reply_token,
             TextSendMessage(text=reply_text)
         )
 
+        # 儲存對話紀錄
         db.collection("messages").add({
             "user_id": user_id,
             "type": "text",
@@ -201,11 +196,11 @@ def handle_message(event):
 
     except Exception as e:
         print("⚠️ OpenAI API 發生錯誤：", e)
-        traceback.print_exc()  # 這會把完整錯誤堆疊印出來到 GCP log
+        traceback.print_exc()
         line_bot_api.reply_message(
-        reply_token,
-        TextSendMessage(text="小頁剛才有點迷路了，能再說一次看看嗎？😊")
-    )
+            reply_token,
+            TextSendMessage(text="小頁剛才有點迷路了，能再說一次看看嗎？😊")
+        )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
