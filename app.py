@@ -80,13 +80,11 @@ def handle_message(event):
             )
             image_url = dalle_response['data'][0]['url']
 
-            # 傳送圖片
             line_bot_api.reply_message(
                 reply_token,
                 ImageSendMessage(original_content_url=image_url, preview_image_url=image_url)
             )
 
-            # 寫入 Firebase（圖片訊息）
             db.collection("messages").add({
                 "user_id": user_id,
                 "type": "image",
@@ -168,18 +166,18 @@ def handle_message(event):
                 },
                 {"role": "user", "content": user_text}
             ],
-            max_tokens=200
+            max_tokens=200,
+            timeout=10,        # 加入 timeout
+            max_retries=1      # 避免 OpenAI 自動 retry
         )
 
         reply_text = response['choices'][0]['message']['content'].strip()
 
-        # 回覆使用者
         line_bot_api.reply_message(
             reply_token,
             TextSendMessage(text=reply_text)
         )
 
-        # 寫入 Firebase（文字訊息）
         db.collection("messages").add({
             "user_id": user_id,
             "type": "text",
@@ -187,9 +185,22 @@ def handle_message(event):
             "reply": reply_text
         })
 
+    except openai.error.RateLimitError as e:
+        print("⚠️ OpenAI API 限流錯誤：", e)
+        line_bot_api.reply_message(
+            reply_token,
+            TextSendMessage(text="小頁現在有點忙碌，請稍後再試一次 🙏")
+        )
+
+    except openai.error.Timeout as e:
+        print("⚠️ OpenAI API 超時錯誤：", e)
+        line_bot_api.reply_message(
+            reply_token,
+            TextSendMessage(text="小頁剛才連線有點慢，可以再說一次嗎？😊")
+        )
+
     except Exception as e:
-        error_details = traceback.format_exc()
-        print("⚠️ OpenAI API 發生錯誤：\n", error_details)
+        print("⚠️ OpenAI API 發生錯誤：", traceback.format_exc())
         line_bot_api.reply_message(
             reply_token,
             TextSendMessage(text="小頁剛才有點迷路了，能再說一次看看嗎？😊")
