@@ -100,7 +100,7 @@ def handle_message(event):
 
         # 處理一般聊天（GPT）
         chat_response = openai.ChatCompletion.create(
-            model="gpt-4o",
+            model="gpt-3.5-turbo",
             messages=[
                 {
                     "role": "system",
