@@ -168,7 +168,7 @@ def handle_message(event):
                 },
                 {"role": "user", "content": user_text}
             ],
-            max_tokens=500
+            max_tokens=200
         )
 
         reply_text = response['choices'][0]['message']['content'].strip()
