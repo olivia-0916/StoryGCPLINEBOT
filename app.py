@@ -67,6 +67,8 @@ def handle_message(event):
     user_text = event.message.text
     user_id = event.source.user_id
     reply_token = event.reply_token
+    
+    print(f"📥 收到訊息：{user_text}")  # ⬅️ 放在這裡！
 
     try:
         # === 檢查是否已處理過這個 reply_token ===
@@ -116,9 +118,9 @@ def handle_message(event):
         # === 檢查是否重複文字訊息 ===
         existing_text = user_doc.collection("messages")\
             .where("type", "==", "text").where("content", "==", user_text).stream()
-        if any(existing_text):
-            print("⚠️ 重複文字訊息，跳過處理")
-            return
+        #if any(existing_text):
+            #print("⚠️ 重複文字訊息，跳過處理")
+            #return
 
         # === 根據用戶會話處理訊息並取得回應 ===
         assistant_reply = get_openai_response(user_id, user_text)
