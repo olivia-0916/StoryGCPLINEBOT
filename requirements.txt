@@ -2,5 +2,4 @@ flask
 line-bot-sdk
 openai==0.28
 python-dotenv
-firebase-admin
-
+firebase-admin>=6.0.0
