@@ -82,18 +82,19 @@ def handle_message(event):
 
         # === 儲存對話到「單一 conversation 文件」 ===
         convo_ref = user_doc_ref.collection("messages").document("conversation")
-        convo_ref.set({
+
+        # 若文件不存在，先建立空的 history 陣列
+        if not convo_ref.get().exists:
+            convo_ref.set({"history": []})
+
+        # 加入新的訊息到 history 陣列中
+        convo_ref.update({
             "history": firestore.ArrayUnion([{
                 "user": user_text,
                 "assistant": assistant_reply,
                 "timestamp": firestore.SERVER_TIMESTAMP
             }])
-        }, merge=True)
-
-    except Exception as e:
-        print(f"❌ 錯誤: {e}")
-        traceback.print_exc()
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="系統出了點問題，請稍後再試～"))
+        })
 
 # ====== GPT 回應邏輯 ======
 def get_openai_response(user_id, user_message):
