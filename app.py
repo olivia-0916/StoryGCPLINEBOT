@@ -222,7 +222,7 @@ def get_openai_response(user_id, user_message):
     
     # 呼叫 OpenAI API
     response = openai.ChatCompletion.create(
-        model="gpt-4o",  # 使用 gpt-3.5 模型
+        model="gpt-3.5-turbo",  # 使用 gpt-3.5 模型
         messages=messages
     )
     
