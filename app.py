@@ -107,9 +107,7 @@ def handle_message(event):
 
 # === GPT 回應邏輯 ===
 def get_openai_response(user_id, user_message):
-    if user_id not in user_sessions:
-        user_sessions[user_id] = {
-            "system_prompt": """你是「小頁」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
+    system_prompt = """你是「小頁」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
 請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
 🌱 第一階段：故事創作引導
 引導使用者想像角色、場景與情節，發展成五段故事。每次回覆後，請簡要整理目前的段落並提醒進度。
@@ -117,30 +115,32 @@ def get_openai_response(user_id, user_message):
 🎨 第二階段：插圖引導
 插圖風格溫馨童趣、色彩柔和、畫面簡單。
 幫助使用者描述畫面，並在完成後詢問是否需調整。
-請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。""",
-            "first_interaction": True
+請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。"""
+
+    # 初始化對話歷史
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            "messages": [{"role": "system", "content": system_prompt}]
         }
 
-    session = user_sessions[user_id]
-
-    if session["first_interaction"]:
-        messages = [
-            {"role": "system", "content": session["system_prompt"]},
-            {"role": "user", "content": user_message}
-        ]
-        session["first_interaction"] = False
-    else:
-        # 只傳遞用戶訊息，保持系統提示一致
-        messages = [{"role": "user", "content": user_message}]
+    # 加入使用者訊息
+    user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
 
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
-            messages=messages,
+            messages=user_sessions[user_id]["messages"],
             max_tokens=60,
             temperature=0.7
         )
-        return response.choices[0].message["content"]
+
+        assistant_reply = response.choices[0].message["content"]
+
+        # 加入助手回應到歷史中
+        user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
+
+        return assistant_reply
+
     except Exception as e:
         print("❌ OpenAI 錯誤：", e)
         traceback.print_exc()
