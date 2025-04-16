@@ -117,7 +117,7 @@ def get_openai_response(user_id, user_message):
 幫助使用者描述畫面，並在完成後詢問是否需調整。
 請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。"""
 
-    # 初始化對話歷史
+    # 初始化使用者對話
     if user_id not in user_sessions:
         user_sessions[user_id] = {
             "messages": [{"role": "system", "content": system_prompt}]
@@ -125,6 +125,11 @@ def get_openai_response(user_id, user_message):
 
     # 加入使用者訊息
     user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
+
+    # 限制對話歷史只保留最後 20 筆（不含 system）
+    messages_to_keep = [user_sessions[user_id]["messages"][0]]  # 保留 system prompt
+    messages_to_keep += user_sessions[user_id]["messages"][-20:]
+    user_sessions[user_id]["messages"] = messages_to_keep
 
     try:
         response = openai.ChatCompletion.create(
@@ -136,8 +141,13 @@ def get_openai_response(user_id, user_message):
 
         assistant_reply = response.choices[0].message["content"]
 
-        # 加入助手回應到歷史中
+        # 加入助手回應
         user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
+
+        # 再次限制對話歷史（包含新回應）
+        messages_to_keep = [user_sessions[user_id]["messages"][0]]
+        messages_to_keep += user_sessions[user_id]["messages"][-20:]
+        user_sessions[user_id]["messages"] = messages_to_keep
 
         return assistant_reply
 
