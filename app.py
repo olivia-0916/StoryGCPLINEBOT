@@ -130,6 +130,7 @@ def get_openai_response(user_id, user_message):
         ]
         session["first_interaction"] = False
     else:
+        # 只傳遞用戶訊息，保持系統提示一致
         messages = [{"role": "user", "content": user_message}]
 
     try:
