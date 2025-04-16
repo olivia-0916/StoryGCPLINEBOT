@@ -54,7 +54,6 @@ def callback():
         abort(400)
     return "OK"
 
-
 # === 處理訊息事件 ===
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -101,42 +100,56 @@ def handle_message(event):
         print("❌ 錯誤處理訊息：", e)
         traceback.print_exc()
         line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我出了點問題 🙇"))
-    
-    return  # 放在最外層結尾
+
+    return
 
 
 # === GPT 回應邏輯 ===
 def get_openai_response(user_id, user_message):
     system_prompt = """
-    你是「小頁」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。 
-    請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。 
-    第一階段：故事創作引導 引導使用者想像角色、場景與情節，發展成五段故事。每次回覆後，請簡要整理目前的段落並提醒進度。 
-    不要主導故事，保持引導與陪伴。 
-    第二階段：插圖引導 插圖風格溫馨童趣、色彩柔和、畫面簡單。 
-    幫助使用者描述畫面，並在完成後詢問是否需調整。 
-    請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。"""
+你是「小頁」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
+請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
+第一階段：故事創作引導，引導使用者想像角色、場景與情節，發展成五段故事。每次回覆後，請簡要整理目前的段落並提醒進度。
+不要主導故事，保持引導與陪伴。
+第二階段：插圖引導，插圖風格溫馨童趣、色彩柔和、畫面簡單。
+幫助使用者描述畫面，並在完成後詢問是否需調整。
+請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。
+""".strip()
 
-    # 如果使用者第一次對話，初始化一次（✅只執行一次）
+    # 如果第一次，建立 session
     if user_id not in user_sessions:
         user_sessions[user_id] = {
             "messages": [{"role": "system", "content": system_prompt}]
         }
 
-    # 如果 messages 中已經有 system，就不要再加
-    # 並確保只保留一個 system message
+    # 只保留一個 system prompt
     user_sessions[user_id]["messages"] = [
-        msg for msg in user_sessions[user_id]["messages"]
-        if msg["role"] != "system"
+        msg for msg in user_sessions[user_id]["messages"] if msg["role"] != "system"
     ]
     user_sessions[user_id]["messages"].insert(0, {"role": "system", "content": system_prompt})
 
     # 加入使用者訊息
     user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
 
-    # 限制對話長度
+    # 限制長度：只保留 system + 最近 20 則對話
     messages_to_keep = user_sessions[user_id]["messages"][:1]  # system
-    messages_to_keep += user_sessions[user_id]["messages"][-20:]  # 最近訊息
+    messages_to_keep += user_sessions[user_id]["messages"][-20:]
     user_sessions[user_id]["messages"] = messages_to_keep
+
+    # 呼叫 OpenAI API
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=user_sessions[user_id]["messages"],
+            temperature=0.7,
+        )
+        assistant_message = response.choices[0].message["content"]
+        user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_message})
+        return assistant_message
+    except Exception as e:
+        print("❌ OpenAI 回應錯誤：", e)
+        return None
+
 
 # === 啟動伺服器 ===
 if __name__ == "__main__":
