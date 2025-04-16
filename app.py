@@ -8,9 +8,9 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 import openai
 
-# Firebase
-import firebase_admin
-from firebase_admin import credentials, firestore
+# Firebase（註解中）
+# import firebase_admin
+# from firebase_admin import credentials, firestore
 
 sys.stdout.reconfigure(encoding='utf-8')
 app = Flask(__name__)
@@ -26,12 +26,12 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
 
-# ====== Firebase 初始化 ======
-def get_firebase_credentials_from_env():
-    return credentials.Certificate(json.loads(FIREBASE_CREDENTIALS))
+# ====== Firebase 初始化（註解中） ======
+# def get_firebase_credentials_from_env():
+#     return credentials.Certificate(json.loads(FIREBASE_CREDENTIALS))
 
-firebase_admin.initialize_app(get_firebase_credentials_from_env())
-db = firestore.client()
+# firebase_admin.initialize_app(get_firebase_credentials_from_env())
+# db = firestore.client()
 
 # ====== 儲存會話狀態 ======
 user_sessions = {}
@@ -61,15 +61,15 @@ def handle_message(event):
     print(f"📥 收到訊息：{user_text}")
 
     try:
-        # 避免重複處理
-        token_ref = db.collection("processed_tokens").document(reply_token)
-        if token_ref.get().exists:
-            return
-        else:
-            token_ref.set({"handled": True})
+        # === Firebase token 判斷與儲存（註解中） ===
+        # token_ref = db.collection("processed_tokens").document(reply_token)
+        # if token_ref.get().exists:
+        #     return
+        # else:
+        #     token_ref.set({"handled": True})
 
-        user_doc_ref = db.collection("users").document(user_id)
-        user_doc_ref.set({"updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
+        # user_doc_ref = db.collection("users").document(user_id)
+        # user_doc_ref.set({"updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
 
         # === 取得 GPT 回應 ===
         assistant_reply = get_openai_response(user_id, user_text)
@@ -80,20 +80,23 @@ def handle_message(event):
         # === 回覆使用者 ===
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
 
-        # === 儲存對話到「單一 conversation 文件」 ===
-        convo_ref = user_doc_ref.collection("messages").document("conversation")
+        # === 儲存對話到 Firebase（註解中） ===
+        # convo_ref = user_doc_ref.collection("messages").document("conversation")
+        # convo_ref.set({
+        #     "history": firestore.ArrayUnion([{
+        #         "user": user_text,
+        #         "assistant": assistant_reply,
+        #         "timestamp": firestore.SERVER_TIMESTAMP
+        #     }])
+        # }, merge=True)
 
-        # 直接合併 history 陣列（如果文件不存在會自動建立）
-        convo_ref.set({
-        "history": firestore.ArrayUnion([{
-        "user": user_text,
-        "assistant": assistant_reply,
-        "timestamp": firestore.SERVER_TIMESTAMP
-                }])
-        }, merge=True)
+        return  # 確保結束處理
 
-    
-
+    except Exception as e:
+        print("❌ 錯誤處理訊息：", e)
+        traceback.print_exc()
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我出了點問題 🙇"))
+        return
 
 # ====== GPT 回應邏輯 ======
 def get_openai_response(user_id, user_message):
@@ -129,13 +132,13 @@ def get_openai_response(user_id, user_message):
         response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=messages,
-            max_tokens=60,# 大約 35 中文字（1 字 ≈ 2 tokens），可視狀況再微調
-            temperature=0.7  # 可選，加一點變化性
-
+            max_tokens=60,  # 大約 35 中文字（1 字 ≈ 2 tokens）
+            temperature=0.7
         )
         return response.choices[0].message["content"]
     except Exception as e:
         print("❌ OpenAI 錯誤：", e)
+        traceback.print_exc()
         return None
 
 # ====== 運行應用程式 ======
