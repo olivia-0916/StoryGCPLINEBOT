@@ -2,46 +2,48 @@ import sys
 import os
 import json
 import traceback
+from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import openai
 
-# Firebase（註解中）
-# import firebase_admin
-# from firebase_admin import credentials, firestore
+# ✅ Firebase
+import firebase_admin
+from firebase_admin import credentials, firestore
 
+# === Python 編碼設定 ===
 sys.stdout.reconfigure(encoding='utf-8')
 app = Flask(__name__)
 
-# ====== 環境變數讀取 ======
+# === 環境變數設定 ===
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS")
 
-# ====== 初始化 LINE / OpenAI ======
+# === 初始化 LINE / OpenAI ===
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
 
-# ====== Firebase 初始化（註解中） ======
-# def get_firebase_credentials_from_env():
-#     return credentials.Certificate(json.loads(FIREBASE_CREDENTIALS))
+# === 初始化 Firebase ===
+def get_firebase_credentials_from_env():
+    return credentials.Certificate(json.loads(FIREBASE_CREDENTIALS))
 
-# firebase_admin.initialize_app(get_firebase_credentials_from_env())
-# db = firestore.client()
+firebase_admin.initialize_app(get_firebase_credentials_from_env())
+db = firestore.client()
 
-# ====== 儲存會話狀態 ======
+# === 儲存會話狀態 ===
 user_sessions = {}
 
-# ====== 首頁測試路由 ======
+# === 首頁測試路由 ===
 @app.route("/")
 def index():
     return "LINE GPT Webhook is running!"
 
-# ====== LINE Webhook 路由 ======
+# === LINE Webhook 路由 ===
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
@@ -52,7 +54,7 @@ def callback():
         abort(400)
     return "OK"
 
-# ====== 處理訊息事件 ======
+# === 處理訊息事件 ===
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text
@@ -61,17 +63,7 @@ def handle_message(event):
     print(f"📥 收到訊息：{user_text}")
 
     try:
-        # === Firebase token 判斷與儲存（註解中） ===
-        # token_ref = db.collection("processed_tokens").document(reply_token)
-        # if token_ref.get().exists:
-        #     return
-        # else:
-        #     token_ref.set({"handled": True})
-
-        # user_doc_ref = db.collection("users").document(user_id)
-        # user_doc_ref.set({"updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
-
-        # === 取得 GPT 回應 ===
+        # === GPT 回應 ===
         assistant_reply = get_openai_response(user_id, user_text)
         if not assistant_reply:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="我遇到一點問題，請稍後再試～"))
@@ -80,17 +72,18 @@ def handle_message(event):
         # === 回覆使用者 ===
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
 
-        # === 儲存對話到 Firebase（註解中） ===
-        # convo_ref = user_doc_ref.collection("messages").document("conversation")
-        # convo_ref.set({
-        #     "history": firestore.ArrayUnion([{
-        #         "user": user_text,
-        #         "assistant": assistant_reply,
-        #         "timestamp": firestore.SERVER_TIMESTAMP
-        #     }])
-        # }, merge=True)
+        # === 儲存訊息到 Firebase ===
+        user_doc_ref = db.collection("users").document(user_id)
+        messages_collection = user_doc_ref.collection("messages")
 
-        return  # 確保結束處理
+        messages_collection.add({
+            "user_text": user_text,
+            "assistant_reply": assistant_reply,
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "created_at": datetime.utcnow().isoformat()
+        })
+
+        return
 
     except Exception as e:
         print("❌ 錯誤處理訊息：", e)
@@ -98,9 +91,8 @@ def handle_message(event):
         line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我出了點問題 🙇"))
         return
 
-# ====== GPT 回應邏輯 ======
+# === GPT 回應邏輯 ===
 def get_openai_response(user_id, user_message):
-    # 初始化使用者狀態
     if user_id not in user_sessions:
         user_sessions[user_id] = {
             "system_prompt": """你是「小頁」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
@@ -124,15 +116,13 @@ def get_openai_response(user_id, user_message):
         ]
         session["first_interaction"] = False
     else:
-        messages = [
-            {"role": "user", "content": user_message}
-        ]
+        messages = [{"role": "user", "content": user_message}]
 
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=messages,
-            max_tokens=60,  # 大約 35 中文字（1 字 ≈ 2 tokens）
+            max_tokens=60,
             temperature=0.7
         )
         return response.choices[0].message["content"]
@@ -141,7 +131,7 @@ def get_openai_response(user_id, user_message):
         traceback.print_exc()
         return None
 
-# ====== 運行應用程式 ======
+# === 啟動伺服器 ===
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
