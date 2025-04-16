@@ -86,33 +86,13 @@ def handle_message(event):
 # === 儲存訊息到 Firebase ===
 def save_to_firebase(user_id, role, text):
     try:
-        # 🔸 直接指向單一文件 users/{user_id}/conversation
-        conversation_ref = db.collection("users").document(user_id).collection("data").document("conversation")
-        
-        new_message = {
+        user_doc_ref = db.collection("users").document(user_id)
+        user_doc_ref.collection("chat").add({
             "role": role,
             "text": text,
             "timestamp": firestore.SERVER_TIMESTAMP
-        }
-
-        def update_conversation(transaction, ref):
-            snapshot = ref.get(transaction=transaction)
-            if snapshot.exists:
-                data = snapshot.to_dict()
-                messages = data.get("messages", [])
-            else:
-                messages = []
-
-            messages.append(new_message)
-
-            # 為避免 Firestore 文件過大，你也可以限制最多只保留最近 100 則：
-            # messages = messages[-100:]
-
-            transaction.set(ref, {"messages": messages}, merge=True)
-
-        db.run_transaction(lambda transaction: update_conversation(transaction, conversation_ref))
-        print(f"✅ Firebase 已儲存訊息（{role}）到 users/{user_id}/data/conversation 文件")
-
+        })
+        print(f"✅ Firebase 已儲存訊息（{role}）")
     except Exception as e:
         print(f"⚠️ 儲存 Firebase 失敗（{role}）：", e)
 
