@@ -1,4 +1,4 @@
-    import sys
+import sys
 import os
 import json
 import traceback
@@ -54,6 +54,7 @@ def callback():
         abort(400)
     return "OK"
 
+
 # === 處理訊息事件 ===
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -71,32 +72,38 @@ def handle_message(event):
 
         # === 回覆使用者 ===
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
-        
+        print("✅ 已回覆給 LINE 使用者")
 
         # === 儲存訊息到 Firebase ===
-        user_doc_ref = db.collection("users").document(user_id)
+        try:
+            print("✅ 開始儲存至 Firebase")
+            user_doc_ref = db.collection("users").document(user_id)
 
-        # 儲存使用者訊息
-        user_doc_ref.collection("chat").add({
-            "role": "user",
-            "text": user_text,
-            "timestamp": firestore.SERVER_TIMESTAMP
-        })
+            # 儲存使用者訊息
+            user_doc_ref.collection("chat").add({
+                "role": "user",
+                "text": user_text,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
 
-        # 儲存 AI 回應
-        user_doc_ref.collection("chat").add({
-            "role": "assistant",
-            "text": assistant_reply,
-            "timestamp": firestore.SERVER_TIMESTAMP
-        })
+            # 儲存 AI 回應
+            user_doc_ref.collection("chat").add({
+                "role": "assistant",
+                "text": assistant_reply,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
+            print("✅ Firebase 儲存成功")
 
-        return
+        except Exception as firebase_error:
+            print("⚠️ 無法儲存到 Firebase：", firebase_error)
 
     except Exception as e:
         print("❌ 錯誤處理訊息：", e)
         traceback.print_exc()
         line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我出了點問題 🙇"))
-        return
+    
+    return  # 放在最外層結尾
+
 
 # === GPT 回應邏輯 ===
 def get_openai_response(user_id, user_message):
