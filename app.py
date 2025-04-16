@@ -100,11 +100,15 @@ def save_to_firebase(user_id, role, text):
 
 # 全域變數：記錄使用者的 user message 次數
 
-user_message_counts = {}
+import openai
 
-# AI 回應邏輯
-def get_openai_response(user_id, user_message):
-    base_system_prompt = """
+# 儲存使用者對話和摘要的資料
+user_sessions = {}
+user_message_counts = {}
+story_summaries = {}
+
+# 預設的系統提示
+base_system_prompt = """
 你是「小頁」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
 請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
 第一階段：故事創作引導，引導使用者想像角色、場景與情節，發展成五段故事。
@@ -114,11 +118,15 @@ def get_openai_response(user_id, user_message):
 請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。
 """.strip()
 
-    # 初始化 session 與計數器
+# 儲存使用者的歷史訊息
+def get_openai_response(user_id, user_message):
+    # 初始化對話記錄和消息計數
     if user_id not in user_sessions:
         user_sessions[user_id] = {"messages": []}
     if user_id not in user_message_counts:
         user_message_counts[user_id] = 0
+    if user_id not in story_summaries:
+        story_summaries[user_id] = ""
 
     # 記錄使用者訊息
     user_sessions[user_id]["messages"].append({
@@ -127,21 +135,23 @@ def get_openai_response(user_id, user_message):
     })
     user_message_counts[user_id] += 1
 
-    # 擷取最近 20 則非 system 訊息
-    history = [
-        msg for msg in user_sessions[user_id]["messages"]
-        if msg["role"] != "system"
-    ][-20:]
+    # 每 5 次發言後總結一次故事
+    if user_message_counts[user_id] % 5 == 0:
+        base_system_prompt += "\n請在這次回覆後，用 150 字內簡要總結目前的故事內容（不用重複細節），之後我會將這個摘要提供給你作為背景，請延續故事創作。"
 
-    # 是否加入總結提示？
-    system_prompt = base_system_prompt
-    if user_message_counts[user_id] % 3 == 0:
-        system_prompt += "\n請在這次回覆後簡要總結目前的故事內容，並提醒使用者這是第幾段。"
+    # 若有摘要，加入作為上下文
+    summary_context = story_summaries[user_id]
+    if summary_context:
+        base_system_prompt += f"\n\n【故事摘要】\n{summary_context}\n請根據以上摘要，延續創作對話內容。"
 
-    # 建構完整對話
-    messages = [{"role": "system", "content": system_prompt}] + history
+    # 僅取最近 5 條對話（減少 token）
+    recent_history = user_sessions[user_id]["messages"][-5:]
+
+    # 整合系統提示與對話歷史
+    messages = [{"role": "system", "content": base_system_prompt}] + recent_history
 
     try:
+        # 進行對話生成
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=messages,
@@ -149,16 +159,38 @@ def get_openai_response(user_id, user_message):
         )
         assistant_reply = response.choices[0].message["content"]
 
-        # 儲存 AI 回應
+        # 儲存 AI 回覆
         user_sessions[user_id]["messages"].append({
             "role": "assistant",
             "content": assistant_reply
         })
+
+        # 如果是 5 次發言，從 AI 回覆中提取摘要
+        if user_message_counts[user_id] % 5 == 0:
+            story_summaries[user_id] = extract_summary_from_reply(assistant_reply)
+
         return assistant_reply
 
     except Exception as e:
         print("❌ OpenAI 回應錯誤：", e)
         return None
+
+# 提取摘要的函數
+def extract_summary_from_reply(reply_text):
+    # 用正則表達式或關鍵字提取摘要段落
+    parts = reply_text.strip().split("\n")
+    for part in reversed(parts):
+        if "這段故事" in part or "總結" in part or "目前的故事內容" in part:
+            return part.strip()
+    return ""
+
+# 用戶範例
+user_id = "user123"
+user_message = "小光決定自己種花，展開一段挑戰的冒險。"
+
+# 呼叫函式獲得回應
+response = get_openai_response(user_id, user_message)
+print(response)
 
 
 # === 啟動 Flask 伺服器 ===
