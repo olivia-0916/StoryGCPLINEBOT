@@ -1,4 +1,4 @@
-import sys
+    import sys
 import os
 import json
 import traceback
@@ -71,16 +71,23 @@ def handle_message(event):
 
         # === 回覆使用者 ===
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
+        
 
         # === 儲存訊息到 Firebase ===
         user_doc_ref = db.collection("users").document(user_id)
-        messages_collection = user_doc_ref.collection("messages")
 
-        messages_collection.add({
-            "user_text": user_text,
-            "assistant_reply": assistant_reply,
-            "timestamp": firestore.SERVER_TIMESTAMP,
-            "created_at": datetime.utcnow().isoformat()
+        # 儲存使用者訊息
+        user_doc_ref.collection("chat").add({
+            "role": "user",
+            "text": user_text,
+            "timestamp": firestore.SERVER_TIMESTAMP
+        })
+
+        # 儲存 AI 回應
+        user_doc_ref.collection("chat").add({
+            "role": "assistant",
+            "text": assistant_reply,
+            "timestamp": firestore.SERVER_TIMESTAMP
         })
 
         return
