@@ -96,27 +96,35 @@ def save_to_firebase(user_id, role, text):
     except Exception as e:
         print(f"⚠️ 儲存 Firebase 失敗（{role}）：", e)
 
-# === GPT 回應邏輯 ===
+
+# 全域變數：記錄使用者的 user message 次數
+
+user_message_counts = {}
+
+# AI 回應邏輯
 def get_openai_response(user_id, user_message):
-    system_prompt = """
+    base_system_prompt = """
 你是「小頁」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
 請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
-第一階段：故事創作引導，引導使用者想像角色、場景與情節，發展成五段故事。每次回覆後，請簡要整理目前的段落並提醒進度。
+第一階段：故事創作引導，引導使用者想像角色、場景與情節，發展成五段故事。
 不要主導故事，保持引導與陪伴。
 第二階段：插圖引導，插圖風格溫馨童趣、色彩柔和、畫面簡單。
 幫助使用者描述畫面，並在完成後詢問是否需調整。
 請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。
 """.strip()
 
-    # 初始化 session（只執行一次）
+    # 初始化 session 與計數器
     if user_id not in user_sessions:
         user_sessions[user_id] = {"messages": []}
+    if user_id not in user_message_counts:
+        user_message_counts[user_id] = 0
 
-    # 加入使用者訊息
+    # 記錄使用者訊息
     user_sessions[user_id]["messages"].append({
         "role": "user",
         "content": user_message
     })
+    user_message_counts[user_id] += 1
 
     # 擷取最近 20 則非 system 訊息
     history = [
@@ -124,10 +132,14 @@ def get_openai_response(user_id, user_message):
         if msg["role"] != "system"
     ][-20:]
 
-    # 建立對話：1 則 system + 最近歷史訊息
+    # 是否加入總結提示？
+    system_prompt = base_system_prompt
+    if user_message_counts[user_id] % 3 == 0:
+        system_prompt += "\n請在這次回覆後簡要總結目前的故事內容，並提醒使用者這是第幾段。"
+
+    # 建構完整對話
     messages = [{"role": "system", "content": system_prompt}] + history
 
-    # 呼叫 OpenAI API
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
@@ -135,7 +147,8 @@ def get_openai_response(user_id, user_message):
             temperature=0.7,
         )
         assistant_reply = response.choices[0].message["content"]
-        # 加入 AI 回應到 session
+
+        # 儲存 AI 回應
         user_sessions[user_id]["messages"].append({
             "role": "assistant",
             "content": assistant_reply
@@ -145,6 +158,7 @@ def get_openai_response(user_id, user_message):
     except Exception as e:
         print("❌ OpenAI 回應錯誤：", e)
         return None
+
 
 # === 啟動 Flask 伺服器 ===
 if __name__ == "__main__":
