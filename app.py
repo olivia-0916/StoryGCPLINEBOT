@@ -135,7 +135,6 @@ base_system_prompt = """
 
 # 儲存使用者的歷史訊息
 def get_openai_response(user_id, user_message):
-    # 初始化對話記錄和消息計數
     if user_id not in user_sessions:
         user_sessions[user_id] = {"messages": []}
     if user_id not in user_message_counts:
@@ -143,7 +142,6 @@ def get_openai_response(user_id, user_message):
     if user_id not in story_summaries:
         story_summaries[user_id] = ""
 
-    # 記錄使用者訊息
     user_sessions[user_id]["messages"].append({
         "role": "user",
         "content": user_message
@@ -152,33 +150,31 @@ def get_openai_response(user_id, user_message):
 
     # 每 5 次發言後總結一次故事
     if user_message_counts[user_id] % 5 == 0:
-        # 更新 base_system_prompt，加入故事總結的指示
         global base_system_prompt
         base_system_prompt += "\n請在這次回覆後，用 150 字內簡要總結目前的故事內容（不用重複細節），之後我會將這個摘要提供給你作為背景，請延續故事創作。"
 
-    # 若有摘要，加入作為上下文
     summary_context = story_summaries[user_id]
     if summary_context:
         base_system_prompt += f"\n\n【故事摘要】\n{summary_context}\n請根據以上摘要，延續創作對話內容。"
 
-    # 僅取最近 5 條對話（減少 token）
     recent_history = user_sessions[user_id]["messages"][-5:]
-
-    # 整合系統提示與對話歷史
     messages = [{"role": "system", "content": base_system_prompt}] + recent_history
 
     try:
         print(f"📦 傳給 OpenAI 的訊息：{json.dumps(messages, ensure_ascii=False)}")
         print(f"🧪 使用的 OpenAI Key 開頭：{openai.api_key[:10]}")
-    
+
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=messages,
             temperature=0.7,
         )
         assistant_reply = response.choices[0].message["content"]
+        assistant_reply = format_reply(assistant_reply)  # 👈 加這一行
+        
+        # 將 AI 回覆依「標點符號＋空白」換行，便於 LINE 顯示
+        assistant_reply = re.sub(r'([。！？])\s*', r'\1\n', assistant_reply)
 
-        # 儲存 AI 回覆
         user_sessions[user_id]["messages"].append({
             "role": "assistant",
             "content": assistant_reply
