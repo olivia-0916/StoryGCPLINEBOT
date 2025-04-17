@@ -1,4 +1,3 @@
-
 import sys
 import os
 import json
@@ -18,6 +17,8 @@ from firebase_admin import credentials, firestore
 sys.stdout.reconfigure(encoding='utf-8')
 
 app = Flask(__name__)
+print("✅ Flask App initialized")
+
 
 # === 環境變數設定 ===
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
@@ -39,6 +40,8 @@ db = firestore.client()
 
 # === 儲存每位使用者的 session ===
 user_sessions = {}
+user_message_counts = {}
+story_summaries = {}
 
 # === 首頁測試用 ===
 @app.route("/")
@@ -176,14 +179,6 @@ def extract_summary_from_reply(reply_text):
         if "這段故事" in part or "總結" in part or "目前的故事內容" in part:
             return part.strip()
     return ""
-
-# 用戶範例
-user_id = "user123"
-user_message = "小光決定自己種花，展開一段挑戰的冒險。"
-
-# 呼叫函式獲得回應
-response = get_openai_response(user_id, user_message)
-print(response)
 
 
 # === 啟動 Flask 伺服器 ===
