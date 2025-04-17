@@ -63,22 +63,29 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
-    user_text = event.message.text
+    user_text = event.message.text.strip()
     reply_token = event.reply_token
 
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
+        if user_text.startswith("請畫"):
+            prompt = user_text.replace("請畫", "").strip()
+            image_url = generate_dalle_image(prompt)
+            if image_url:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=f"🎨 小頁幫你畫好了：\n{image_url}"))
+                save_to_firebase(user_id, "user", user_text)
+                save_to_firebase(user_id, "assistant", image_url)
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="圖片生不出來 😢，請試著換個描述試試！"))
+            return
+
         assistant_reply = get_openai_response(user_id, user_text)
         if not assistant_reply:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁暫時卡住了，請稍後再試 🌧️"))
             return
 
-        # 回覆使用者
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
-        print("✅ 已回覆 LINE 使用者")
-
-        # 儲存到 Firebase
         save_to_firebase(user_id, "user", user_text)
         save_to_firebase(user_id, "assistant", assistant_reply)
 
@@ -182,6 +189,23 @@ def extract_summary_from_reply(reply_text):
         if "這段故事" in part or "總結" in part or "目前的故事內容" in part:
             return part.strip()
     return ""
+    
+# 產生 DALL·E 圖片
+def generate_dalle_image(prompt):
+    try:
+        print(f"🖼️ 產生圖片中：{prompt}")
+        response = openai.Image.create(
+            prompt=prompt,
+            n=1,
+            size="512x512"
+        )
+        image_url = response['data'][0]['url']
+        print(f"✅ 產生圖片成功：{image_url}")
+        return image_url
+    except Exception as e:
+        print("❌ 產生圖片失敗：", e)
+        traceback.print_exc()
+        return None
 
 
 # === 啟動 Flask 伺服器 ===
