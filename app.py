@@ -102,9 +102,7 @@ def save_to_firebase(user_id, role, text):
 
 
 # 全域變數：記錄使用者的 user message 次數
-def get_openai_response(user_id, user_message):
-    # 每次都從這裡初始化，不怕被其他使用者改掉
-    base_system_prompt = """
+base_system_prompt = """
 你是「小頁」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
 請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
 第一階段：故事創作引導，引導使用者想像角色、場景與情節，發展成五段故事。
@@ -133,6 +131,8 @@ def get_openai_response(user_id, user_message):
 
     # 每 5 次發言後總結一次故事
     if user_message_counts[user_id] % 5 == 0:
+        # 更新 base_system_prompt，加入故事總結的指示
+        global base_system_prompt
         base_system_prompt += "\n請在這次回覆後，用 150 字內簡要總結目前的故事內容（不用重複細節），之後我會將這個摘要提供給你作為背景，請延續故事創作。"
 
     # 若有摘要，加入作為上下文
