@@ -133,6 +133,11 @@ base_system_prompt = """
 請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。
 """.strip()
 
+
+def format_reply(text):
+    # 將中文句號、問號、驚嘆號後面加換行
+    return re.sub(r'([。！？])\s*', r'\1\n', text)
+    
 # 儲存使用者的歷史訊息
 def get_openai_response(user_id, user_message):
     if user_id not in user_sessions:
@@ -172,8 +177,6 @@ def get_openai_response(user_id, user_message):
         assistant_reply = response.choices[0].message["content"]
         assistant_reply = format_reply(assistant_reply)  # 👈 加這一行
         
-        # 將 AI 回覆依「標點符號＋空白」換行，便於 LINE 顯示
-        assistant_reply = re.sub(r'([。！？])\s*', r'\1\n', assistant_reply)
 
         user_sessions[user_id]["messages"].append({
             "role": "assistant",
