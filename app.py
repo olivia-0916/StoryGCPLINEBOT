@@ -6,7 +6,7 @@ from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 import openai
 
 # === Firebase ===
@@ -63,29 +63,41 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
-    user_text = event.message.text.strip()
+    user_text = event.message.text
     reply_token = event.reply_token
 
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
         if user_text.startswith("請畫"):
+            # 呼叫 DALL·E 產生圖
             prompt = user_text.replace("請畫", "").strip()
             image_url = generate_dalle_image(prompt)
+
             if image_url:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=f"🎨 小頁幫你畫好了：\n{image_url}"))
-                save_to_firebase(user_id, "user", user_text)
-                save_to_firebase(user_id, "assistant", image_url)
+                # 使用 LINE ImageSendMessage 傳送圖片
+                line_bot_api.reply_message(
+                    reply_token,
+                    ImageSendMessage(
+                        original_content_url=image_url,
+                        preview_image_url=image_url  # 預覽圖用一樣的就好
+                    )
+                )
+                print("✅ 已傳送圖片")
             else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="圖片生不出來 😢，請試著換個描述試試！"))
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁畫不出這張圖，試試其他描述看看 🖍️"))
             return
 
+        # 否則照一般流程處理訊息
         assistant_reply = get_openai_response(user_id, user_text)
         if not assistant_reply:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁暫時卡住了，請稍後再試 🌧️"))
             return
 
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
+        print("✅ 已回覆 LINE 使用者")
+
+        # 儲存到 Firebase
         save_to_firebase(user_id, "user", user_text)
         save_to_firebase(user_id, "assistant", assistant_reply)
 
@@ -93,6 +105,7 @@ def handle_message(event):
         print("❌ 發生錯誤：", e)
         traceback.print_exc()
         line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁出了一點小狀況，請稍後再試 🙇"))
+
 
 # === 儲存訊息到 Firebase ===
 def save_to_firebase(user_id, role, text):
