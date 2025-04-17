@@ -147,7 +147,9 @@ def get_openai_response(user_id, user_message):
     messages = [{"role": "system", "content": base_system_prompt}] + recent_history
 
     try:
-        # 進行對話生成
+        print(f"📦 傳給 OpenAI 的訊息：{json.dumps(messages, ensure_ascii=False)}")
+        print(f"🧪 使用的 OpenAI Key 開頭：{openai.api_key[:10]}")
+    
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=messages,
@@ -161,7 +163,6 @@ def get_openai_response(user_id, user_message):
             "content": assistant_reply
         })
 
-        # 如果是 5 次發言，從 AI 回覆中提取摘要
         if user_message_counts[user_id] % 5 == 0:
             story_summaries[user_id] = extract_summary_from_reply(assistant_reply)
 
@@ -169,7 +170,9 @@ def get_openai_response(user_id, user_message):
 
     except Exception as e:
         print("❌ OpenAI 回應錯誤：", e)
+        traceback.print_exc()
         return None
+
 
 # 提取摘要的函數
 def extract_summary_from_reply(reply_text):
