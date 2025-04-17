@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import traceback
+import re
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
