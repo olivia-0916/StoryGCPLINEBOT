@@ -70,18 +70,19 @@ def handle_message(event):
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
-        if user_text.startswith("請畫"):
-            # 呼叫 DALL·E 產生圖
-            prompt = user_text.replace("請畫", "").strip()
+        # ✅ 判斷是否包含請求畫圖的語句
+        if re.search(r"(請畫|幫我畫|生成.*圖片|幫我生成.*圖片|畫.*圖|我想要一張.*圖)", user_text):
+            prompt = re.sub(r"(請畫|幫我畫|請幫我畫|幫我生成|請幫我生成|我想要一張)", "", user_text)
+            prompt = re.sub(r"(的圖片|圖片|的圖|圖)", "", prompt).strip()
+
             image_url = generate_dalle_image(prompt)
 
             if image_url:
-                # 使用 LINE ImageSendMessage 傳送圖片
                 line_bot_api.reply_message(
                     reply_token,
                     ImageSendMessage(
                         original_content_url=image_url,
-                        preview_image_url=image_url  # 預覽圖用一樣的就好
+                        preview_image_url=image_url
                     )
                 )
                 print("✅ 已傳送圖片")
