@@ -181,8 +181,9 @@ def extract_title_from_reply(reply_text):
 
 def generate_dalle_image(prompt, user_id):
     try:
-        if user_id in story_image_urls:
-            return story_image_urls[user_id]
+        key = (user_id, prompt)
+        if key in story_image_urls:
+            return story_image_urls[key]
 
         full_prompt = f"{prompt}。請用繪本風格：乾淨、清爽、溫馨。畫風一致。"
         print(f"🖼️ 產生圖片中：{full_prompt}")
@@ -194,7 +195,7 @@ def generate_dalle_image(prompt, user_id):
         )
         image_url = response['data'][0]['url']
         print(f"✅ 產生圖片成功：{image_url}")
-        story_image_urls[user_id] = image_url
+        story_image_urls[key] = image_url
         return image_url
     except Exception as e:
         print("❌ 產生圖片失敗：", e)
