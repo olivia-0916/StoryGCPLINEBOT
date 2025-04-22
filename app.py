@@ -204,14 +204,15 @@ def extract_summary_from_reply(reply_text):
             return part.strip()
     return ""
     
-# 產生 DALL·E 圖片
+# 產生 DALL·E 3 圖片
 def generate_dalle_image(prompt):
     try:
         print(f"🖼️ 產生圖片中：{prompt}")
         response = openai.Image.create(
+            model="dall-e-3",
             prompt=prompt,
-            n=1,
-            size="512x512"
+            size="1024x1024",
+            response_format="url"
         )
         image_url = response['data'][0]['url']
         print(f"✅ 產生圖片成功：{image_url}")
