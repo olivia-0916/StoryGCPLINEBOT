@@ -62,6 +62,7 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     return "OK"
+    
 
 # === 處理 LINE 訊息 ===
 @handler.add(MessageEvent, message=TextMessage)
@@ -80,27 +81,22 @@ def handle_message(event):
             image_url = generate_dalle_image(prompt)
 
             if image_url:
-                # ✅ 上傳圖片到 Firebase Storage
-                firebase_image_url = upload_image_to_firebase(image_url, user_id)
-
-                if firebase_image_url:
-                    line_bot_api.reply_message(
-                        reply_token,
-                        ImageSendMessage(
-                            original_content_url=firebase_image_url,
-                            preview_image_url=firebase_image_url
-                        )
+                line_bot_api.reply_message(
+                    reply_token,
+                    ImageSendMessage(
+                        original_content_url=image_url,
+                        preview_image_url=image_url
                     )
-                    print("✅ 圖片已回傳給用戶並上傳 Firebase Storage")
-                    save_to_firebase(user_id, "user", user_text)
-                    save_to_firebase(user_id, "assistant", firebase_image_url)
-                else:
-                    line_bot_api.reply_message(reply_token, TextSendMessage(text="圖片上傳失敗了，請稍後再試 😢"))
+                )
+                print("✅ 已傳送圖片")
+                # 儲存到 Firebase
+                save_to_firebase(user_id, "user", user_text)
+                save_to_firebase(user_id, "assistant", image_url)
             else:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁畫不出這張圖，試試其他描述看看 🖍️"))
             return
 
-        # === 一般訊息處理 ===
+        # 一般訊息處理
         assistant_reply = get_openai_response(user_id, user_text)
         if not assistant_reply:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁暫時卡住了，請稍後再試 🌧️"))
@@ -109,6 +105,7 @@ def handle_message(event):
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
         print("✅ 已回覆 LINE 使用者")
 
+        # 儲存到 Firebase
         save_to_firebase(user_id, "user", user_text)
         save_to_firebase(user_id, "assistant", assistant_reply)
 
@@ -116,6 +113,7 @@ def handle_message(event):
         print("❌ 發生錯誤：", e)
         traceback.print_exc()
         line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁出了一點小狀況，請稍後再試 🙇"))
+
 
 
 # === 儲存訊息到 Firebase ===
@@ -130,26 +128,6 @@ def save_to_firebase(user_id, role, text):
         print(f"✅ Firebase 已儲存訊息（{role}）")
     except Exception as e:
         print(f"⚠️ 儲存 Firebase 失敗（{role}）：", e)
-
-
-# === 上傳圖片到 Firebase Storage 並回傳永久網址 ===
-def upload_image_to_firebase(image_url, user_id):
-    try:
-        response = requests.get(image_url)
-        if response.status_code != 200:
-            raise Exception("圖片下載失敗")
-
-        filename = f"{user_id}/{uuid.uuid4()}.png"
-        bucket = storage.bucket()
-        blob = bucket.blob(filename)
-        blob.upload_from_string(response.content, content_type="image/png")
-        blob.make_public()  # 或改成你需要的存取權限設定
-
-        print("✅ 圖片已上傳至 Firebase Storage：", blob.public_url)
-        return blob.public_url
-    except Exception as e:
-        print("❌ 圖片上傳 Firebase 失敗：", e)
-        return None
 
 
 # 全域變數：記錄使用者的 user message 次數
