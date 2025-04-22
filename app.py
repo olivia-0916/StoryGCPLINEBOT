@@ -60,7 +60,6 @@ def callback():
         abort(400)
     return "OK"
 
-# === 處理 LINE 訊息 ===
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -70,11 +69,10 @@ def handle_message(event):
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
-        # ✅ 判斷是否包含請求畫圖的語句
-        if re.search(r"(請畫|幫我畫|生成.*圖片|幫我生成.*圖片|畫.*圖|我想要一張.*圖)", user_text):
-            prompt = re.sub(r"(請畫|幫我畫|請幫我畫|幫我生成|請幫我生成|我想要一張)", "", user_text)
-            prompt = re.sub(r"(的圖片|圖片|的圖|圖)", "", prompt).strip()
-
+        # ✅ 檢查是否為畫圖請求
+        match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
+        if match:
+            prompt = match.group(1).strip()
             image_url = generate_dalle_image(prompt)
 
             if image_url:
@@ -86,11 +84,14 @@ def handle_message(event):
                     )
                 )
                 print("✅ 已傳送圖片")
+                # 儲存到 Firebase
+                save_to_firebase(user_id, "user", user_text)
+                save_to_firebase(user_id, "assistant", image_url)
             else:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁畫不出這張圖，試試其他描述看看 🖍️"))
             return
 
-        # 否則照一般流程處理訊息
+        # 一般訊息處理
         assistant_reply = get_openai_response(user_id, user_text)
         if not assistant_reply:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁暫時卡住了，請稍後再試 🌧️"))
@@ -107,6 +108,7 @@ def handle_message(event):
         print("❌ 發生錯誤：", e)
         traceback.print_exc()
         line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁出了一點小狀況，請稍後再試 🙇"))
+
 
 
 # === 儲存訊息到 Firebase ===
