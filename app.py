@@ -181,10 +181,11 @@ def extract_title_from_reply(reply_text):
 
 def generate_dalle_image(prompt, user_id):
     try:
-        key = (user_id, prompt)
-        if key in story_image_urls:
-            return story_image_urls[key]
+        # 檢查是否已經生成過圖片
+        if user_id in story_image_urls and prompt in story_image_urls[user_id]:
+            return story_image_urls[user_id][prompt]  # 返回已經儲存的圖片
 
+        # 如果沒有生成過圖片，則生成新圖片
         full_prompt = f"{prompt}。請用繪本風格：乾淨、清爽、溫馨。畫風一致。"
         print(f"🖼️ 產生圖片中：{full_prompt}")
         response = openai.Image.create(
@@ -195,7 +196,12 @@ def generate_dalle_image(prompt, user_id):
         )
         image_url = response['data'][0]['url']
         print(f"✅ 產生圖片成功：{image_url}")
-        story_image_urls[key] = image_url
+        
+        # 儲存圖片 URL
+        if user_id not in story_image_urls:
+            story_image_urls[user_id] = {}
+        story_image_urls[user_id][prompt] = image_url  # 儲存每個用戶的圖片 URL 和 prompt
+        
         return image_url
     except Exception as e:
         print("❌ 產生圖片失敗：", e)
