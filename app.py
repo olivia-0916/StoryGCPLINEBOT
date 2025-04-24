@@ -14,7 +14,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSend
 from firebase_admin import firestore, storage
 import firebase_admin
 from firebase_admin import credentials, firestore
-from imgurpython import ImgurClient
+import base64
 
 sys.stdout.reconfigure(encoding='utf-8')
 #測試是否有git
@@ -31,7 +31,6 @@ IMGUR_CLIENT_SECRET = os.environ.get("IMGUR_CLIENT_SECRET")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
-imgur_client = ImgurClient(IMGUR_CLIENT_ID, IMGUR_CLIENT_SECRET)
 
 def get_firebase_credentials_from_env():
     return credentials.Certificate(json.loads(FIREBASE_CREDENTIALS))
@@ -215,35 +214,40 @@ def generate_dalle_image(prompt, user_id):
             
             # 上傳到 Imgur
             print("💾 開始上傳到 Imgur...")
-            # 建立臨時檔案
-            temp_file = f"temp_{uuid.uuid4()}.png"
-            with open(temp_file, "wb") as f:
-                f.write(img_data)
+            # 將圖片轉換為 base64
+            img_base64 = base64.b64encode(img_data).decode('utf-8')
             
-            # 上傳檔案
-            uploaded_image = imgur_client.upload_from_path(
-                temp_file,
-                config=None,
-                anon=True
-            )
+            # 準備上傳資料
+            url = "https://api.imgur.com/3/image"
+            headers = {
+                "Authorization": f"Client-ID {IMGUR_CLIENT_ID}"
+            }
+            data = {
+                "image": img_base64,
+                "type": "base64"
+            }
             
-            # 刪除臨時檔案
-            os.remove(temp_file)
+            # 上傳圖片
+            response = requests.post(url, headers=headers, data=data)
+            response_data = response.json()
             
-            # 取得 Imgur 圖片 URL
-            imgur_url = uploaded_image['link']
-            print(f"✅ 圖片已上傳到 Imgur：{imgur_url}")
-            
-            # 儲存圖片 URL 到 Firestore
-            user_doc_ref = db.collection("users").document(user_id)
-            user_doc_ref.collection("images").add({
-                "url": imgur_url,
-                "prompt": prompt,
-                "timestamp": firestore.SERVER_TIMESTAMP
-            })
-            print("✅ 圖片資訊已儲存到 Firestore")
-            
-            return imgur_url
+            if response.status_code == 200 and response_data['success']:
+                imgur_url = response_data['data']['link']
+                print(f"✅ 圖片已上傳到 Imgur：{imgur_url}")
+                
+                # 儲存圖片 URL 到 Firestore
+                user_doc_ref = db.collection("users").document(user_id)
+                user_doc_ref.collection("images").add({
+                    "url": imgur_url,
+                    "prompt": prompt,
+                    "timestamp": firestore.SERVER_TIMESTAMP
+                })
+                print("✅ 圖片資訊已儲存到 Firestore")
+                
+                return imgur_url
+            else:
+                print(f"❌ Imgur API 回應錯誤：{response_data}")
+                return image_url  # 如果 Imgur 上傳失敗，返回原始 URL
             
         except Exception as e:
             print(f"❌ 上傳圖片到 Imgur 失敗：{e}")
