@@ -189,11 +189,10 @@ def generate_dalle_image(prompt, user_id):
             return story_image_urls[user_id][prompt]  # 返回已經儲存的圖片
 
         # 如果沒有生成過圖片，則生成新圖片
-        full_prompt = f"{prompt}。請用繪本風格：乾淨、清爽、溫馨。畫風一致。"
-        print(f"🖼️ 產生圖片中：{full_prompt}")
+        print(f"🖼️ 產生圖片中：{prompt}")
         response = openai.Image.create(
             model="dall-e-3",
-            prompt=full_prompt,
+            prompt=prompt,
             size="1024x1024",
             response_format="url"
         )
@@ -224,7 +223,8 @@ def generate_dalle_image(prompt, user_id):
             }
             data = {
                 "image": img_base64,
-                "type": "base64"
+                "type": "base64",
+                "privacy": "hidden"  # 設定為私有
             }
             
             # 上傳圖片
@@ -233,12 +233,14 @@ def generate_dalle_image(prompt, user_id):
             
             if response.status_code == 200 and response_data['success']:
                 imgur_url = response_data['data']['link']
+                deletehash = response_data['data']['deletehash']  # 儲存刪除雜湊值
                 print(f"✅ 圖片已上傳到 Imgur：{imgur_url}")
                 
-                # 儲存圖片 URL 到 Firestore
+                # 儲存圖片 URL 和刪除雜湊值到 Firestore
                 user_doc_ref = db.collection("users").document(user_id)
                 user_doc_ref.collection("images").add({
                     "url": imgur_url,
+                    "deletehash": deletehash,  # 儲存刪除雜湊值
                     "prompt": prompt,
                     "timestamp": firestore.SERVER_TIMESTAMP
                 })
