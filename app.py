@@ -215,11 +215,20 @@ def generate_dalle_image(prompt, user_id):
             
             # 上傳到 Imgur
             print("💾 開始上傳到 Imgur...")
-            uploaded_image = imgur_client.upload_from_memory(
-                img_data,
+            # 建立臨時檔案
+            temp_file = f"temp_{uuid.uuid4()}.png"
+            with open(temp_file, "wb") as f:
+                f.write(img_data)
+            
+            # 上傳檔案
+            uploaded_image = imgur_client.upload_from_path(
+                temp_file,
                 config=None,
                 anon=True
             )
+            
+            # 刪除臨時檔案
+            os.remove(temp_file)
             
             # 取得 Imgur 圖片 URL
             imgur_url = uploaded_image['link']
