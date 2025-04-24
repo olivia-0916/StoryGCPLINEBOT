@@ -204,20 +204,40 @@ def generate_dalle_image(prompt, user_id):
         
         # 下載並儲存圖片到本地
         try:
+            # 顯示當前工作目錄
+            current_dir = os.getcwd()
+            print(f"📁 當前工作目錄：{current_dir}")
+            
             # 建立 images 資料夾（如果不存在）
-            if not os.path.exists('images'):
-                os.makedirs('images')
+            images_dir = os.path.join(current_dir, 'images')
+            print(f"📁 嘗試建立資料夾：{images_dir}")
+            
+            if not os.path.exists(images_dir):
+                os.makedirs(images_dir)
+                print(f"✅ 成功建立 images 資料夾")
+            else:
+                print(f"ℹ️ images 資料夾已存在")
             
             # 產生唯一的檔案名稱
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"images/{prompt[:30]}_{timestamp}.png"
+            filename = os.path.join(images_dir, f"{prompt[:30]}_{timestamp}.png")
+            print(f"📄 準備儲存檔案：{filename}")
             
             # 下載並儲存圖片
+            print("⬇️ 開始下載圖片...")
             img_data = requests.get(image_url).content
+            print("✅ 圖片下載完成")
+            
+            print("💾 開始儲存檔案...")
             with open(filename, "wb") as f:
                 f.write(img_data)
-            
             print(f"✅ 圖片已儲存到本地：{filename}")
+            
+            # 確認檔案是否存在
+            if os.path.exists(filename):
+                print(f"✅ 確認檔案已建立：{filename}")
+            else:
+                print(f"❌ 檔案未成功建立：{filename}")
             
         except Exception as e:
             print(f"❌ 儲存本地圖片失敗：{e}")
