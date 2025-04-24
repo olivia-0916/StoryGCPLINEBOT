@@ -110,7 +110,7 @@ base_system_prompt = """
 請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
 第一階段：故事創作引導，引導使用者想像角色、場景與情節，發展成五段故事。
 不要主導故事，保持引導與陪伴。
-第二階段：插圖引導。
+第二階段：插圖引導，插圖風格溫馨童趣、色彩柔和、畫面簡單。
 幫助使用者描述畫面，並在完成後詢問是否需調整。
 請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。
 """.strip()
@@ -129,10 +129,10 @@ def get_openai_response(user_id, user_message):
     user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
     user_message_counts[user_id] += 1
 
-    if user_message_counts[user_id] == 5:
+    if user_message_counts[user_id] == 30:
         user_sessions[user_id]["messages"].append({
             "role": "user",
-            "content": "請為這五段故事取個標題，大約五六個字就好。"
+            "content": "請為這三十段故事取個標題，大約五六個字就好。"
         })
 
     summary_context = story_summaries[user_id]
@@ -140,7 +140,7 @@ def get_openai_response(user_id, user_message):
     if summary_context:
         prompt_with_summary += f"\n\n【故事摘要】\n{summary_context}\n請根據以上摘要，延續創作對話內容。"
 
-    recent_history = user_sessions[user_id]["messages"][-5:]
+    recent_history = user_sessions[user_id]["messages"][-30:]
     messages = [{"role": "system", "content": prompt_with_summary}] + recent_history
 
     try:
@@ -155,13 +155,13 @@ def get_openai_response(user_id, user_message):
 
         user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
 
-        if user_message_counts[user_id] == 5:
+        if user_message_counts[user_id] == 30:
             summary = extract_summary_from_reply(assistant_reply)
             title = extract_title_from_reply(assistant_reply)
             story_summaries[user_id] = summary
             story_titles[user_id] = title
             # 準備生成封面
-            prompt = f"故事名稱：{title}，主題是：{summary}，畫風為溫馨童趣、色彩柔和、畫面簡單"
+            prompt = f"故事名稱：{title}，主題是：{summary}"
             story_image_prompts[user_id] = prompt
 
         return assistant_reply
@@ -264,3 +264,4 @@ def generate_dalle_image(prompt, user_id):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
