@@ -16,7 +16,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 sys.stdout.reconfigure(encoding='utf-8')
-
+#測試是否有git
 app = Flask(__name__)
 print("✅ Flask App initialized")
 
@@ -201,6 +201,27 @@ def generate_dalle_image(prompt, user_id):
         if user_id not in story_image_urls:
             story_image_urls[user_id] = {}
         story_image_urls[user_id][prompt] = image_url  # 儲存每個用戶的圖片 URL 和 prompt
+        
+        # 下載並儲存圖片到本地
+        try:
+            # 建立 images 資料夾（如果不存在）
+            if not os.path.exists('images'):
+                os.makedirs('images')
+            
+            # 產生唯一的檔案名稱
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"images/{prompt[:30]}_{timestamp}.png"
+            
+            # 下載並儲存圖片
+            img_data = requests.get(image_url).content
+            with open(filename, "wb") as f:
+                f.write(img_data)
+            
+            print(f"✅ 圖片已儲存到本地：{filename}")
+            
+        except Exception as e:
+            print(f"❌ 儲存本地圖片失敗：{e}")
+            traceback.print_exc()
         
         return image_url
     except Exception as e:
