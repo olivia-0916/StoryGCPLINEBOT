@@ -14,6 +14,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSend
 from firebase_admin import firestore, storage
 import firebase_admin
 from firebase_admin import credentials, firestore
+from imgurpython import ImgurClient
 
 sys.stdout.reconfigure(encoding='utf-8')
 #測試是否有git
@@ -24,10 +25,13 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS")
+IMGUR_CLIENT_ID = os.environ.get("IMGUR_CLIENT_ID")
+IMGUR_CLIENT_SECRET = os.environ.get("IMGUR_CLIENT_SECRET")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
+imgur_client = ImgurClient(IMGUR_CLIENT_ID, IMGUR_CLIENT_SECRET)
 
 def get_firebase_credentials_from_env():
     return credentials.Certificate(json.loads(FIREBASE_CREDENTIALS))
@@ -202,48 +206,41 @@ def generate_dalle_image(prompt, user_id):
             story_image_urls[user_id] = {}
         story_image_urls[user_id][prompt] = image_url  # 儲存每個用戶的圖片 URL 和 prompt
         
-        # 下載並儲存圖片到本地
+        # 下載並上傳到 Imgur
         try:
-            # 顯示當前工作目錄
-            current_dir = os.getcwd()
-            print(f"📁 當前工作目錄：{current_dir}")
-            
-            # 建立 images 資料夾（如果不存在）
-            images_dir = os.path.join(current_dir, 'images')
-            print(f"📁 嘗試建立資料夾：{images_dir}")
-            
-            if not os.path.exists(images_dir):
-                os.makedirs(images_dir)
-                print(f"✅ 成功建立 images 資料夾")
-            else:
-                print(f"ℹ️ images 資料夾已存在")
-            
-            # 產生唯一的檔案名稱
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = os.path.join(images_dir, f"{prompt[:30]}_{timestamp}.png")
-            print(f"📄 準備儲存檔案：{filename}")
-            
-            # 下載並儲存圖片
+            # 下載圖片
             print("⬇️ 開始下載圖片...")
             img_data = requests.get(image_url).content
             print("✅ 圖片下載完成")
             
-            print("💾 開始儲存檔案...")
-            with open(filename, "wb") as f:
-                f.write(img_data)
-            print(f"✅ 圖片已儲存到本地：{filename}")
+            # 上傳到 Imgur
+            print("💾 開始上傳到 Imgur...")
+            uploaded_image = imgur_client.upload_from_memory(
+                img_data,
+                config=None,
+                anon=True
+            )
             
-            # 確認檔案是否存在
-            if os.path.exists(filename):
-                print(f"✅ 確認檔案已建立：{filename}")
-            else:
-                print(f"❌ 檔案未成功建立：{filename}")
+            # 取得 Imgur 圖片 URL
+            imgur_url = uploaded_image['link']
+            print(f"✅ 圖片已上傳到 Imgur：{imgur_url}")
+            
+            # 儲存圖片 URL 到 Firestore
+            user_doc_ref = db.collection("users").document(user_id)
+            user_doc_ref.collection("images").add({
+                "url": imgur_url,
+                "prompt": prompt,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
+            print("✅ 圖片資訊已儲存到 Firestore")
+            
+            return imgur_url
             
         except Exception as e:
-            print(f"❌ 儲存本地圖片失敗：{e}")
+            print(f"❌ 上傳圖片到 Imgur 失敗：{e}")
             traceback.print_exc()
+            return image_url  # 如果 Imgur 上傳失敗，返回原始 URL
         
-        return image_url
     except Exception as e:
         print("❌ 產生圖片失敗：", e)
         traceback.print_exc()
