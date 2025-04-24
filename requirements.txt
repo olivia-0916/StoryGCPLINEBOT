@@ -4,5 +4,5 @@ openai==0.28
 python-dotenv
 firebase-admin
 gunicorn
-imgurpython
+requests
 
