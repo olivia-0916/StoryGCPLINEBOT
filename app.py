@@ -7,7 +7,7 @@ import re
 import uuid
 import requests
 from datetime import datetime
-from flask import Flask, request, abort
+from flask import Flask, request, abort, render_template, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
@@ -59,6 +59,22 @@ def callback():
         abort(400)
     return "OK"
 
+def reset_story_memory(user_id):
+    """重置使用者的故事相關記憶"""
+    if user_id in user_sessions:
+        user_sessions[user_id] = {"messages": []}
+    if user_id in user_message_counts:
+        user_message_counts[user_id] = 0
+    if user_id in story_summaries:
+        story_summaries[user_id] = ""
+    if user_id in story_titles:
+        story_titles[user_id] = ""
+    if user_id in story_image_prompts:
+        story_image_prompts[user_id] = ""
+    if user_id in story_image_urls:
+        story_image_urls[user_id] = {}
+    print(f"✅ 已重置使用者 {user_id} 的故事記憶")
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -67,6 +83,12 @@ def handle_message(event):
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
+        # 檢查是否包含「開始說故事」的關鍵字
+        if re.search(r"(開始說故事|說個故事|講個故事|說一個故事|講一個故事)", user_text):
+            reset_story_memory(user_id)
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，讓我們開始創作一個新的故事吧！請告訴我你想要創作什麼樣的故事呢？"))
+            return
+
         match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
         if match:
             prompt = match.group(1).strip()
@@ -261,7 +283,72 @@ def generate_dalle_image(prompt, user_id):
         traceback.print_exc()
         return None
 
+@app.route("/story/<user_id>")
+def view_story(user_id):
+    try:
+        # 從 Firebase 獲取使用者資料
+        user_doc_ref = db.collection("users").document(user_id)
+        images = user_doc_ref.collection("images").order_by("timestamp").get()
+        chat = user_doc_ref.collection("chat").order_by("timestamp").get()
+        
+        # 整理資料
+        story_data = {
+            "title": story_titles.get(user_id, "我們的故事"),
+            "summary": story_summaries.get(user_id, ""),
+            "images": [],
+            "content": []
+        }
+        
+        # 處理圖片
+        for img in images:
+            story_data["images"].append({
+                "url": img.get("url"),
+                "prompt": img.get("prompt")
+            })
+            
+        # 處理對話內容
+        for msg in chat:
+            if msg.get("role") == "assistant":
+                story_data["content"].append(msg.get("text"))
+        
+        return render_template("story.html", story=story_data)
+    except Exception as e:
+        print(f"❌ 讀取故事失敗：{e}")
+        return "無法讀取故事", 404
+
+@app.route("/api/story/<user_id>")
+def get_story_data(user_id):
+    try:
+        # 從 Firebase 獲取使用者資料
+        user_doc_ref = db.collection("users").document(user_id)
+        images = user_doc_ref.collection("images").order_by("timestamp").get()
+        chat = user_doc_ref.collection("chat").order_by("timestamp").get()
+        
+        # 整理資料
+        story_data = {
+            "title": story_titles.get(user_id, "我們的故事"),
+            "summary": story_summaries.get(user_id, ""),
+            "images": [],
+            "content": []
+        }
+        
+        # 處理圖片
+        for img in images:
+            story_data["images"].append({
+                "url": img.get("url"),
+                "prompt": img.get("prompt")
+            })
+            
+        # 處理對話內容
+        for msg in chat:
+            if msg.get("role") == "assistant":
+                story_data["content"].append(msg.get("text"))
+        
+        return jsonify(story_data)
+    except Exception as e:
+        print(f"❌ 讀取故事失敗：{e}")
+        return jsonify({"error": "無法讀取故事"}), 404
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-
