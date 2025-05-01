@@ -106,7 +106,7 @@ def generate_story_summary(messages):
         ]
         
         response = openai.ChatCompletion.create(
-            model="gpt-4",
+            model="gpt-4o-mini",
             messages=messages_for_summary,
             temperature=0.7,
         )
@@ -137,11 +137,13 @@ def handle_message(event):
                 
             summary = generate_story_summary(user_sessions[user_id]["messages"])
             if summary:
-                # 在總結前加入提示文字
-                formatted_summary = "以下是目前的故事內容：\n\n" + summary
+                # 在總結後加入插圖階段的提議
+                formatted_summary = "以下是目前的故事內容：\n\n" + summary + "\n\n故事已經完成了！要不要開始為故事畫插圖呢？我們可以從第一段故事開始，請告訴我你想要如何描繪第一段故事的場景？"
                 line_bot_api.reply_message(reply_token, TextSendMessage(text=formatted_summary))
                 save_to_firebase(user_id, "user", user_text)
                 save_to_firebase(user_id, "assistant", formatted_summary)
+                # 重置當前段落為第一段
+                story_current_paragraph[user_id] = 0
             else:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我現在無法總結故事，請稍後再試。"))
             return
