@@ -154,14 +154,39 @@ def handle_message(event):
             current_paragraph = story_current_paragraph.get(user_id, 0) + 1
             image_url = generate_dalle_image(prompt, user_id)
             if image_url:
-                # 在回覆中加入當前段落資訊
-                reply_text = f"這是第 {current_paragraph} 段故事的插圖："
-                line_bot_api.reply_message(reply_token, [
-                    TextSendMessage(text=reply_text),
-                    ImageSendMessage(original_content_url=image_url, preview_image_url=image_url)
-                ])
+                # 獲取下一段故事的內容
+                next_paragraph = current_paragraph + 1
+                next_story_content = ""
+                if next_paragraph <= 5:
+                    # 從故事摘要中提取下一段內容
+                    summary = story_summaries.get(user_id, "")
+                    paragraphs = summary.split('\n')
+                    if len(paragraphs) >= next_paragraph:
+                        next_story_content = paragraphs[next_paragraph - 1].strip()
+
+                # 構建回覆訊息
+                reply_messages = []
+                
+                # 第一條訊息：顯示當前插圖
+                reply_messages.append(TextSendMessage(text=f"這是第 {current_paragraph} 段故事的插圖："))
+                reply_messages.append(ImageSendMessage(original_content_url=image_url, preview_image_url=image_url))
+                
+                # 第二條訊息：詢問是否需要調整
+                reply_messages.append(TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？"))
+                
+                # 第三條訊息：提議畫下一段
+                if next_paragraph <= 5:
+                    next_story_prompt = f"要不要開始畫第 {next_paragraph} 段故事的插圖呢？\n\n第 {next_paragraph} 段故事內容是：\n{next_story_content}\n\n請告訴我你想要如何描繪這個場景？"
+                    reply_messages.append(TextSendMessage(text=next_story_prompt))
+                else:
+                    reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
+
+                # 發送所有訊息
+                line_bot_api.reply_message(reply_token, reply_messages)
+                
+                # 儲存到 Firebase
                 save_to_firebase(user_id, "user", user_text)
-                save_to_firebase(user_id, "assistant", f"{reply_text}\n{image_url}")
+                save_to_firebase(user_id, "assistant", f"第 {current_paragraph} 段故事插圖：{image_url}")
             else:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁畫不出這張圖，試試其他描述看看 🖍️"))
             return
