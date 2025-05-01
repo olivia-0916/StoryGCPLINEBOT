@@ -44,6 +44,7 @@ story_summaries = {}
 story_titles = {}
 story_image_prompts = {}
 story_image_urls = {}
+story_current_paragraph = {}
 
 @app.route("/")
 def index():
@@ -73,6 +74,8 @@ def reset_story_memory(user_id):
         story_image_prompts[user_id] = ""
     if user_id in story_image_urls:
         story_image_urls[user_id] = {}
+    if user_id in story_current_paragraph:
+        story_current_paragraph[user_id] = 0
     print(f"✅ 已重置使用者 {user_id} 的故事記憶")
 
 def generate_story_summary(messages):
@@ -80,8 +83,21 @@ def generate_story_summary(messages):
     try:
         summary_prompt = """
 請將以下對話內容整理成五個段落的故事情節，每個段落用數字標記（1. 2. 3. 4. 5.）。
-請保持故事的連貫性，並確保每個段落都清楚表達故事的重要情節。
-請用簡潔的文字描述，每段不超過 50 字。
+請遵循以下格式要求：
+1. 每個段落必須單獨一行
+2. 每個段落約20字左右
+3. 保持故事的連貫性
+4. 使用簡潔的文字描述
+5. 確保每個段落都清楚表達故事的重要情節
+
+範例格式：
+1. 小明在森林裡發現一隻受傷的小鳥。
+2. 他決定帶小鳥回家照顧。
+3. 經過細心照料，小鳥逐漸康復。
+4. 小鳥學會了飛行，但捨不得離開。
+5. 最後小鳥選擇留下來陪伴小明。
+
+請按照以上格式整理故事內容。
 """
         messages_for_summary = [
             {"role": "system", "content": summary_prompt},
@@ -90,7 +106,7 @@ def generate_story_summary(messages):
         ]
         
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4",
             messages=messages_for_summary,
             temperature=0.7,
         )
@@ -121,9 +137,11 @@ def handle_message(event):
                 
             summary = generate_story_summary(user_sessions[user_id]["messages"])
             if summary:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=summary))
+                # 在總結前加入提示文字
+                formatted_summary = "以下是目前的故事內容：\n\n" + summary
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=formatted_summary))
                 save_to_firebase(user_id, "user", user_text)
-                save_to_firebase(user_id, "assistant", summary)
+                save_to_firebase(user_id, "assistant", formatted_summary)
             else:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我現在無法總結故事，請稍後再試。"))
             return
@@ -131,11 +149,17 @@ def handle_message(event):
         match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
         if match:
             prompt = match.group(1).strip()
+            current_paragraph = story_current_paragraph.get(user_id, 0) + 1
             image_url = generate_dalle_image(prompt, user_id)
             if image_url:
-                line_bot_api.reply_message(reply_token, ImageSendMessage(original_content_url=image_url, preview_image_url=image_url))
+                # 在回覆中加入當前段落資訊
+                reply_text = f"這是第 {current_paragraph} 段故事的插圖："
+                line_bot_api.reply_message(reply_token, [
+                    TextSendMessage(text=reply_text),
+                    ImageSendMessage(original_content_url=image_url, preview_image_url=image_url)
+                ])
                 save_to_firebase(user_id, "user", user_text)
-                save_to_firebase(user_id, "assistant", image_url)
+                save_to_firebase(user_id, "assistant", f"{reply_text}\n{image_url}")
             else:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁畫不出這張圖，試試其他描述看看 🖍️"))
             return
@@ -171,8 +195,7 @@ base_system_prompt = """
 請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
 第一階段：故事創作引導，引導使用者想像角色、場景與情節，發展成五段故事。
 不要主導故事，保持引導與陪伴。
-第二階段：插圖引導，插圖風格溫馨童趣、色彩柔和、畫面簡單。
-幫助使用者描述畫面，並在完成後詢問是否需調整。
+第二階段：插圖引導，幫助使用者描述畫面，並在完成後詢問是否需調整。
 請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。
 """.strip()
 
@@ -186,9 +209,15 @@ def get_openai_response(user_id, user_message):
         user_message_counts[user_id] = 0
     if user_id not in story_summaries:
         story_summaries[user_id] = ""
+    if user_id not in story_current_paragraph:
+        story_current_paragraph[user_id] = 0
 
     user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
     user_message_counts[user_id] += 1
+
+    # 更新當前段落
+    if user_message_counts[user_id] % 6 == 0:  # 每6條訊息更新一次段落
+        story_current_paragraph[user_id] = min(4, story_current_paragraph[user_id] + 1)
 
     if user_message_counts[user_id] == 30:
         user_sessions[user_id]["messages"].append({
@@ -207,7 +236,7 @@ def get_openai_response(user_id, user_message):
     try:
         print(f"📦 傳給 OpenAI 的訊息：{json.dumps(messages, ensure_ascii=False)}")
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",
             messages=messages,
             temperature=0.7,
         )
@@ -250,7 +279,7 @@ def generate_dalle_image(prompt, user_id):
             return story_image_urls[user_id][prompt]  # 返回已經儲存的圖片
 
         # 如果沒有生成過圖片，則生成新圖片
-        print(f"🖼️ 產生圖片中：{prompt}")
+        print(f"🖍️ 產生圖片中：{prompt}")
         response = openai.Image.create(
             model="dall-e-3",
             prompt=prompt,
