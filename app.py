@@ -75,6 +75,30 @@ def reset_story_memory(user_id):
         story_image_urls[user_id] = {}
     print(f"✅ 已重置使用者 {user_id} 的故事記憶")
 
+def generate_story_summary(messages):
+    """根據對話歷史生成故事總結"""
+    try:
+        summary_prompt = """
+請將以下對話內容整理成五個段落的故事情節，每個段落用數字標記（1. 2. 3. 4. 5.）。
+請保持故事的連貫性，並確保每個段落都清楚表達故事的重要情節。
+請用簡潔的文字描述，每段不超過 50 字。
+"""
+        messages_for_summary = [
+            {"role": "system", "content": summary_prompt},
+            {"role": "user", "content": "以下是故事對話內容："},
+            *messages
+        ]
+        
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=messages_for_summary,
+            temperature=0.7,
+        )
+        return response.choices[0].message["content"]
+    except Exception as e:
+        print("❌ 生成故事總結失敗：", e)
+        return None
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -87,6 +111,21 @@ def handle_message(event):
         if re.search(r"(開始說故事|說個故事|講個故事|說一個故事|講一個故事)", user_text):
             reset_story_memory(user_id)
             line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，讓我們開始創作一個新的故事吧！請告訴我你想要創作什麼樣的故事呢？"))
+            return
+
+        # 檢查是否要求總結故事
+        if re.search(r"(幫我統整|整理|總結|歸納|目前的故事)", user_text):
+            if user_id not in user_sessions or not user_sessions[user_id]["messages"]:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="目前還沒有故事內容可以總結喔！"))
+                return
+                
+            summary = generate_story_summary(user_sessions[user_id]["messages"])
+            if summary:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=summary))
+                save_to_firebase(user_id, "user", user_text)
+                save_to_firebase(user_id, "assistant", summary)
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我現在無法總結故事，請稍後再試。"))
             return
 
         match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
