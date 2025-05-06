@@ -239,11 +239,22 @@ def get_openai_response(user_id, user_message):
     if user_id not in story_current_paragraph:
         story_current_paragraph[user_id] = 0
 
+    # ✅ 檢查低參與輸入，回應鼓勵語
+    low_engagement_inputs = ["不知道", "沒靈感", "嗯", "算了", "不想說", "先跳過", "跳過這題"]
+    if any(phrase in user_message.strip().lower() for phrase in low_engagement_inputs):
+        assistant_reply = random.choice([
+            "沒關係，我們可以慢慢想 👣",
+            "如果不想說，我們可以跳過喔 🙂",
+            "不用急～你已經很棒了 💪"
+        ])
+        user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
+        user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
+        return assistant_reply
+
     user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
     user_message_counts[user_id] += 1
 
-    # 更新當前段落
-    if user_message_counts[user_id] % 6 == 0:  # 每6條訊息更新一次段落
+    if user_message_counts[user_id] % 6 == 0:
         story_current_paragraph[user_id] = min(4, story_current_paragraph[user_id] + 1)
 
     if user_message_counts[user_id] == 30:
@@ -256,6 +267,13 @@ def get_openai_response(user_id, user_message):
     prompt_with_summary = base_system_prompt
     if summary_context:
         prompt_with_summary += f"\n\n【故事摘要】\n{summary_context}\n請根據以上摘要，延續創作對話內容。"
+
+    # ✅ 正向語句集，避免重複與 summary 混用
+    encouragement_suffix = random.choice([
+        "你剛剛的描述真的很棒喔 🌟",
+        "我喜歡你用的那個比喻 👏",
+        "慢慢來，小頁在這裡陪你 😊"
+    ])
 
     recent_history = user_sessions[user_id]["messages"][-30:]
     messages = [{"role": "system", "content": prompt_with_summary}] + recent_history
@@ -270,6 +288,10 @@ def get_openai_response(user_id, user_message):
         assistant_reply = response.choices[0].message["content"]
         assistant_reply = format_reply(assistant_reply)
 
+        # ✅ 非總結類才加入鼓勵語
+        if "故事名稱" not in assistant_reply and "總結" not in assistant_reply:
+            assistant_reply += f"\n\n{encouragement_suffix}"
+
         user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
 
         if user_message_counts[user_id] == 30:
@@ -277,9 +299,7 @@ def get_openai_response(user_id, user_message):
             title = extract_title_from_reply(assistant_reply)
             story_summaries[user_id] = summary
             story_titles[user_id] = title
-            # 準備生成封面
-            prompt = f"故事名稱：{title}，主題是：{summary}"
-            story_image_prompts[user_id] = prompt
+            story_image_prompts[user_id] = f"故事名稱：{title}，主題是：{summary}"
 
         return assistant_reply
 
