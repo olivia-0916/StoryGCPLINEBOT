@@ -15,6 +15,8 @@ from firebase_admin import firestore, storage
 import firebase_admin
 from firebase_admin import credentials, firestore
 import base64
+import random
+
 
 sys.stdout.reconfigure(encoding='utf-8')
 #測試是否有git
