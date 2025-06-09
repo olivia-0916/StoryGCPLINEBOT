@@ -181,7 +181,7 @@ def handle_message(event):
                 
                 # 第三條訊息：提議畫下一段
                 if next_paragraph <= 5 and next_story_content:
-                    next_story_prompt = f"要不要開始畫第 {next_paragraph} 段故事的插圖呢？\n\n第 {next_paragraph} 段故事內容是：\n{next_story_content}\n\n請告訴我你想要如何描繪這個場景？"
+                    next_story_prompt = f"要不要繼續畫第 {next_paragraph} 段故事的插圖呢？\n\n第 {next_paragraph} 段故事內容是：\n{next_story_content}\n\n請告訴我你想要如何描繪這個場景？"
                     reply_messages.append(TextSendMessage(text=next_story_prompt))
                 else:
                     reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
@@ -332,9 +332,11 @@ def generate_dalle_image(prompt, user_id):
 
         # 如果沒有生成過圖片，則生成新圖片
         print(f"🖍️ 產生圖片中：{prompt}")
+        # 修改提示詞，確保不會生成文字
+        enhanced_prompt = f"Create a beautiful illustration for a children's story. {prompt} Important: Do not include any text, numbers, or words in the image. The image should be purely visual."
         response = openai.Image.create(
             model="dall-e-3",
-            prompt=prompt,
+            prompt=enhanced_prompt,
             size="1024x1024",
             response_format="url"
         )
