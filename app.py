@@ -162,9 +162,12 @@ def handle_message(event):
                 if next_paragraph <= 5:
                     # 從故事摘要中提取下一段內容
                     summary = story_summaries.get(user_id, "")
-                    paragraphs = summary.split('\n')
-                    if len(paragraphs) >= next_paragraph:
-                        next_story_content = paragraphs[next_paragraph - 1].strip()
+                    if summary:
+                        paragraphs = [p.strip() for p in summary.split('\n') if p.strip()]
+                        if len(paragraphs) >= next_paragraph:
+                            next_story_content = paragraphs[next_paragraph - 1]
+                            # 移除段落編號（如果有的話）
+                            next_story_content = re.sub(r'^\d+\.\s*', '', next_story_content)
 
                 # 構建回覆訊息
                 reply_messages = []
@@ -177,7 +180,7 @@ def handle_message(event):
                 reply_messages.append(TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？"))
                 
                 # 第三條訊息：提議畫下一段
-                if next_paragraph <= 5:
+                if next_paragraph <= 5 and next_story_content:
                     next_story_prompt = f"要不要開始畫第 {next_paragraph} 段故事的插圖呢？\n\n第 {next_paragraph} 段故事內容是：\n{next_story_content}\n\n請告訴我你想要如何描繪這個場景？"
                     reply_messages.append(TextSendMessage(text=next_story_prompt))
                 else:
