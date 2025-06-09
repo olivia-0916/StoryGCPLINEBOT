@@ -171,7 +171,26 @@ def handle_message(event):
         match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
         if match:
             prompt = match.group(1).strip()
-            current_paragraph = story_current_paragraph.get(user_id, 0)
+            
+            # 從使用者輸入中提取段落編號
+            paragraph_match = re.search(r'第[一二三四五12345]段|第一段|第二段|第三段|第四段|第五段', user_text)
+            if paragraph_match:
+                paragraph_text = paragraph_match.group(0)
+                # 將中文數字轉換為阿拉伯數字
+                chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
+                if paragraph_text[1] in chinese_to_number:
+                    current_paragraph = chinese_to_number[paragraph_text[1]] - 1
+                else:
+                    current_paragraph = int(paragraph_text[1]) - 1
+            else:
+                # 如果沒有指定段落，使用當前段落
+                current_paragraph = story_current_paragraph.get(user_id, 0)
+            
+            # 確保段落編號在有效範圍內
+            if current_paragraph < 0 or current_paragraph >= 5:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
+                return
+                
             image_url = generate_dalle_image(prompt, user_id)
             
             if image_url:
@@ -487,3 +506,4 @@ def get_story_data(user_id):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+    
