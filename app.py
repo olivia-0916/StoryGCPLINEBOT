@@ -169,7 +169,7 @@ def handle_message(event):
 
         # 處理插圖生成請求
         match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
-        if match and illustration_mode.get(user_id, False):
+        if match:
             prompt = match.group(1).strip()
             current_paragraph = story_current_paragraph.get(user_id, 0)
             image_url = generate_dalle_image(prompt, user_id)
