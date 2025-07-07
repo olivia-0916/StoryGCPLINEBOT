@@ -141,7 +141,7 @@ def handle_message(event):
         # 檢查是否包含「開始說故事」的關鍵字
         if re.search(r"(開始說故事|說個故事|講個故事|說一個故事|講一個故事)", user_text):
             reset_story_memory(user_id)
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，讓我們開始創作一個新的故事吧！請告訴我你想要創作什麼樣的故事呢？"))
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，讓我們開始創作一個新的故事吧！主題是「如果我有一個超能力」，你想到的是哪一種超能力呢？"))
             return
 
         # 檢查是否要求總結故事
@@ -224,13 +224,13 @@ def handle_message(event):
                 save_to_firebase(user_id, "user", user_text)
                 save_to_firebase(user_id, "assistant", f"第 {current_paragraph + 1} 段故事插圖：{image_url}")
             else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁畫不出這張圖，試試其他描述看看 🖍️"))
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
             return
 
         # 處理一般對話
         assistant_reply = get_openai_response(user_id, user_text)
         if not assistant_reply:
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁暫時卡住了，請稍後再試 🌧️"))
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時卡住了，請稍後再試 🌧️"))
             return
 
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
@@ -240,7 +240,7 @@ def handle_message(event):
     except Exception as e:
         print("❌ 發生錯誤：", e)
         traceback.print_exc()
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="小頁出了一點小狀況，請稍後再試 🙇"))
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪出了一點小狀況，請稍後再試 🙇"))
 
 def save_to_firebase(user_id, role, text):
     try:
@@ -255,12 +255,15 @@ def save_to_firebase(user_id, role, text):
         print(f"⚠️ 儲存 Firebase 失敗（{role}）：", e)
 
 base_system_prompt = """
-你是「小頁」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
+你是「小繪」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
 請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
-第一階段：故事創作引導，引導使用者想像角色、場景與情節，發展成五段故事。
+
+第一階段：故事創作引導，請以「如果我有一個超能力」為主題，引導使用者想像一位主角、他擁有什麼超能力、他在哪裡、遇到什麼事件、解決了什麼問題，逐步發展成五段故事。
 不要主導故事，保持引導與陪伴。
+
 第二階段：插圖引導，幫助使用者描述畫面，生成的插圖上不要有故事的文字，並在完成後詢問是否需調整。
-請自稱「小頁」，以朋友般的語氣陪伴使用者完成創作。
+
+請自稱「小繪」，以朋友般的語氣陪伴使用者完成創作。
 """.strip()
 
 def format_reply(text):
@@ -309,7 +312,7 @@ def get_openai_response(user_id, user_message):
     encouragement_suffix = random.choice([
         "你剛剛的描述真的很棒喔 🌟",
         "我喜歡你用的那個比喻 👏",
-        "慢慢來，小頁在這裡陪你 😊"
+        "慢慢來，小繪在這裡陪你 😊"
     ])
 
     recent_history = user_sessions[user_id]["messages"][-30:]
