@@ -155,7 +155,6 @@ def handle_message(event):
                 illustration_mode[user_id] = True
                 story_current_paragraph[user_id] = 0
                 # 直接執行插圖流程
-                # 直接跳到插圖流程，不回覆多餘提示
             else:
                 assistant_reply = get_openai_response(user_id, user_text)
                 line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
@@ -229,14 +228,15 @@ def handle_message(event):
 
         # 插圖生成階段
         if illustration_mode.get(user_id, False):
-            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)?(?:第([一二三四五12345])段)?(.*)", user_text)
+            # 新增：允許用戶直接將故事段落內容寫在 prompt 裡，自動補齊 story_paragraphs
+            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)?(?:第([一二三四五12345])段)?[：:\.，, ]*(.*)", user_text)
             current_paragraph = story_current_paragraph.get(user_id, 0)
             manual_select = False
             extra_desc = ""
+            story_content = ""
             if match:
-                # 解析段落
                 paragraph_group = match.group(1)
-                extra_desc = match.group(2).strip()
+                possible_content = match.group(2).strip()
                 if paragraph_group:
                     chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
                     num_char = paragraph_group
@@ -246,16 +246,29 @@ def handle_message(event):
                         current_paragraph = int(num_char) - 1
                     manual_select = True
 
-            # 取出該段故事內容
-            if user_id not in story_paragraphs or len(story_paragraphs[user_id]) <= current_paragraph:
+                # 若用戶在 prompt 裡有給故事內容，且 story_paragraphs 缺這一段，就直接補進去
+                if user_id not in story_paragraphs:
+                    story_paragraphs[user_id] = []
+                while len(story_paragraphs[user_id]) <= current_paragraph:
+                    story_paragraphs[user_id].append("")
+                if possible_content and story_paragraphs[user_id][current_paragraph] == "":
+                    story_paragraphs[user_id][current_paragraph] = possible_content
+                story_content = story_paragraphs[user_id][current_paragraph]
+                extra_desc = ""  # 若用戶已把內容當成段落，則不再額外附加
+            else:
+                # 無法解析段落，預設用目前段落
+                if user_id in story_paragraphs and len(story_paragraphs[user_id]) > current_paragraph:
+                    story_content = story_paragraphs[user_id][current_paragraph]
+                else:
+                    story_content = ""
+
+            # 無段落內容時提醒用戶
+            if not story_content:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text=f"你還沒說過第{current_paragraph+1}段故事內容，請先補上再畫圖喔！"))
                 return
-            story_content = story_paragraphs[user_id][current_paragraph]
+
             # 組裝 prompt
-            if extra_desc:
-                final_prompt = f"{story_content}。{extra_desc}"
-            else:
-                final_prompt = story_content
+            final_prompt = story_content if not extra_desc else f"{story_content}。{extra_desc}"
 
             image_url = generate_dalle_image(final_prompt, user_id)
             print(f"產生圖片 URL: {image_url}")
