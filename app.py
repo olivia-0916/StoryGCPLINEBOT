@@ -275,10 +275,9 @@ def handle_message(event):
                         ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
                         TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？")
                     ]
-
-                    # 提議下一段插圖（如果還有剩段落且不是手動指定）
+                    # 優化：自動推送下一段故事內容與引導語
                     next_paragraph = current_paragraph + 1
-                    if not manual_select and next_paragraph < 5 and user_id in story_paragraphs and len(story_paragraphs[user_id]) >= 5:
+                    if next_paragraph < 5 and user_id in story_paragraphs and len(story_paragraphs[user_id]) >= 5:
                         next_story_content = story_paragraphs[user_id][next_paragraph]
                         next_prompt = (
                             f"要不要繼續畫第 {next_paragraph + 1} 段故事的插圖呢？\n\n"
@@ -288,10 +287,9 @@ def handle_message(event):
                         )
                         reply_messages.append(TextSendMessage(text=next_prompt))
                         story_current_paragraph[user_id] = next_paragraph
-                    elif not manual_select and next_paragraph >= 5:
+                    elif next_paragraph >= 5:
                         reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
                         illustration_mode[user_id] = False
-
                     line_bot_api.reply_message(reply_token, reply_messages)
                     save_to_firebase(user_id, "user", user_text)
                     for msg in reply_messages:
