@@ -139,9 +139,22 @@ def handle_message(event):
     user_text = event.message.text
     reply_token = event.reply_token
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
+    print(f"🔍 目前 practice_mode: {practice_mode.get(user_id)}, illustration_mode: {illustration_mode.get(user_id)}")
 
     try:
-        # 練習模式特別處理：插圖命令直接生成對應圖片，不用帶故事段落
+        # --- 新增：偵測「一起來講故事吧」指令，切換到正式創作階段 ---
+        if "一起來講故事吧" in user_text:
+            practice_mode[user_id] = False
+            illustration_mode[user_id] = True
+            story_current_paragraph[user_id] = 0
+            # 你可以這裡給使用者一個引導訊息
+            line_bot_api.reply_message(
+                reply_token,
+                TextSendMessage(text="太好了，我們開始講故事囉！請告訴我第一段故事內容，或告訴我你想畫什麼圖片。")
+            )
+            return
+
+        # 練習模式：用戶直接要求畫圖，生成練習用圖片，訊息固定
         if practice_mode.get(user_id, False):
             match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
             if match:
@@ -164,89 +177,74 @@ def handle_message(event):
                     line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，小繪畫不出這張圖喔，換個描述試試看吧～"))
                 return
 
-            # 練習模式下其他文字處理可以直接呼叫 GPT，或特殊設計
+            # 練習模式下的其他對話
             assistant_reply = get_openai_response(user_id, user_text)
             line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
             save_to_firebase(user_id, "user", user_text)
             save_to_firebase(user_id, "assistant", assistant_reply)
             return
 
-        # 非練習模式：原本故事流程
-        # 你的既有故事生成和插圖流程...
+        # 正式故事創作階段，插圖生成
+        if illustration_mode.get(user_id, False):
+            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
+            if match:
+                prompt = match.group(1).strip()
 
-    except Exception as e:
-        print("❌ 發生錯誤：", e)
-        traceback.print_exc()
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪出了一點小狀況，請稍後再試 🙇"))
-
-
-        # 處理插圖生成請求
-        match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
-        if match:
-            prompt = match.group(1).strip()
-            
-            # 從使用者輸入中提取段落編號
-            paragraph_match = re.search(r'第[一二三四五12345]段|第一段|第二段|第三段|第四段|第五段', user_text)
-            if paragraph_match:
-                paragraph_text = paragraph_match.group(0)
-                # 將中文數字轉換為阿拉伯數字
-                chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
-                if paragraph_text[1] in chinese_to_number:
-                    current_paragraph = chinese_to_number[paragraph_text[1]] - 1
+                # 嘗試從使用者輸入中提取段落編號（中文或數字）
+                paragraph_match = re.search(r'第[一二三四五12345]段', user_text)
+                if paragraph_match:
+                    chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
+                    p = paragraph_match.group(0)
+                    num_char = p[1]
+                    if num_char in chinese_to_number:
+                        current_paragraph = chinese_to_number[num_char] - 1
+                    else:
+                        current_paragraph = int(num_char) - 1
                 else:
-                    current_paragraph = int(paragraph_text[1]) - 1
-            else:
-                # 如果沒有指定段落，使用當前段落
-                current_paragraph = story_current_paragraph.get(user_id, 0)
-            
-            # 確保段落編號在有效範圍內
-            if current_paragraph < 0 or current_paragraph >= 5:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
+                    # 沒指定段落就用目前段落
+                    current_paragraph = story_current_paragraph.get(user_id, 0)
+
+                # 檢查段落範圍
+                if current_paragraph < 0 or current_paragraph >= 5:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
+                    return
+
+                image_url = generate_dalle_image(prompt, user_id)
+                if image_url:
+                    reply_messages = [
+                        TextSendMessage(text=f"這是第 {current_paragraph + 1} 段故事的插圖："),
+                        ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
+                        TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？")
+                    ]
+
+                    # 提議下一段插圖（如果還有剩段落）
+                    next_paragraph = current_paragraph + 1
+                    if next_paragraph < 5 and user_id in story_paragraphs and len(story_paragraphs[user_id]) >= 5:
+                        next_story_content = story_paragraphs[user_id][next_paragraph]
+                        next_prompt = (
+                            f"要不要繼續畫第 {next_paragraph + 1} 段故事的插圖呢？\n\n"
+                            f"第 {next_paragraph + 1} 段故事內容是：\n{next_story_content}\n\n"
+                            "請告訴我你想要如何描繪這個場景？"
+                        )
+                        reply_messages.append(TextSendMessage(text=next_prompt))
+                        story_current_paragraph[user_id] = next_paragraph
+                    else:
+                        reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
+                        illustration_mode[user_id] = False  # 結束插圖模式
+
+                    line_bot_api.reply_message(reply_token, reply_messages)
+
+                    save_to_firebase(user_id, "user", user_text)
+                    for msg in reply_messages:
+                        if isinstance(msg, TextSendMessage):
+                            save_to_firebase(user_id, "assistant", msg.text)
+                        elif isinstance(msg, ImageSendMessage):
+                            save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
+                else:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
                 return
-                
-            image_url = generate_dalle_image(prompt, user_id)
-            
-            if image_url:
-                # 構建回覆訊息
-                reply_messages = []
-                
-                # 第一條訊息：顯示當前插圖
-                reply_messages.append(TextSendMessage(text=f"這是第 {current_paragraph + 1} 段故事的插圖："))
-                reply_messages.append(ImageSendMessage(original_content_url=image_url, preview_image_url=image_url))
-                
-                # 第二條訊息：詢問是否需要調整
-                reply_messages.append(TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？"))
-                
-                # 第三條訊息：提議畫下一段
-                next_paragraph = current_paragraph + 1
-                if next_paragraph < 5 and user_id in story_paragraphs:
-                    next_story_content = story_paragraphs[user_id][next_paragraph]
-                    next_story_prompt = f"要不要繼續畫第 {next_paragraph + 1} 段故事的插圖呢？\n\n第 {next_paragraph + 1} 段故事內容是：\n{next_story_content}\n\n請告訴我你想要如何描繪這個場景？"
-                    reply_messages.append(TextSendMessage(text=next_story_prompt))
-                    # 更新當前段落
-                    story_current_paragraph[user_id] = next_paragraph
-                else:
-                    reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
-                    # 重置插圖模式
-                    illustration_mode[user_id] = False
 
-                # 發送所有訊息
-                line_bot_api.reply_message(reply_token, reply_messages)
-                
-                # 儲存到 Firebase
-                save_to_firebase(user_id, "user", user_text)
-                
-                # 儲存小繪的所有訊息
-                for msg in reply_messages:
-                    if isinstance(msg, TextSendMessage):
-                        save_to_firebase(user_id, "assistant", msg.text)
-                    elif isinstance(msg, ImageSendMessage):
-                        save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
-            else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
-            return
-
-        # 處理一般對話
+        # 如果都不是上面情況，就正常對話回應
         assistant_reply = get_openai_response(user_id, user_text)
         if not assistant_reply:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時卡住了，請稍後再試 🌧️"))
@@ -260,6 +258,7 @@ def handle_message(event):
         print("❌ 發生錯誤：", e)
         traceback.print_exc()
         line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪出了一點小狀況，請稍後再試 🙇"))
+
 
 def save_to_firebase(user_id, role, text):
     try:
