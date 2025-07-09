@@ -440,9 +440,7 @@ def extract_title_from_reply(reply_text):
 
 def generate_dalle_image(prompt, user_id):
     try:
-        if user_id in story_image_urls and prompt in story_image_urls[user_id]:
-            return story_image_urls[user_id][prompt]  # 返回已經儲存的圖片
-
+        # 不再用 prompt 做快取，永遠呼叫新圖
         print(f"🖍️ 產生圖片中：{prompt}")
         enhanced_prompt = f"""
 {prompt}
@@ -457,10 +455,13 @@ No text, no words, no letters, no captions, no numbers, no Chinese or English ch
         )
         image_url = response['data'][0]['url']
         print(f"✅ 產生圖片成功：{image_url}")
-        
+
+        # 儲存所有生成過的圖片
         if user_id not in story_image_urls:
             story_image_urls[user_id] = {}
-        story_image_urls[user_id][prompt] = image_url
+        if prompt not in story_image_urls[user_id]:
+            story_image_urls[user_id][prompt] = []
+        story_image_urls[user_id][prompt].append(image_url)
         
         try:
             print("⬇️ 開始下載圖片...")
