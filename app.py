@@ -86,6 +86,11 @@ def reset_story_memory(user_id):
     practice_mode[user_id] = True
     print(f"✅ 使用者 {user_id} 的故事記憶已重置並啟用練習模式")
 
+def extract_story_paragraphs(summary):
+    paragraphs = [p.strip() for p in summary.split('\n') if p.strip()]
+    clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in paragraphs]
+    return clean_paragraphs[:5]
+
 def generate_story_summary(messages):
     try:
         summary_prompt = """
@@ -120,11 +125,6 @@ def generate_story_summary(messages):
     except Exception as e:
         print("❌ 生成故事總結失敗：", e)
         return None
-
-def extract_story_paragraphs(summary):
-    paragraphs = [p.strip() for p in summary.split('\n') if p.strip()]
-    clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in paragraphs]
-    return clean_paragraphs[:5]
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -170,10 +170,35 @@ def handle_message(event):
             line_bot_api.reply_message(
                 reply_token,
                 TextSendMessage(
-                    text=f"故事完成囉！我們可以開始生成插圖了。\n\n第一段故事是：\n{first_paragraph}\n\n你可以描述這張圖上有什麼元素，或直接說「幫我畫」我也會自動生成！"
+                    text=f"故事整理完成！我們可以開始生成插圖了。\n\n第一段故事內容是：\n{first_paragraph}\n\n你可以描述這張圖有什麼元素，或直接說「幫我畫」我也會自動生成！"
                 )
             )
             return
+
+        # 檢查是否是「幫我整理」或「總結」故事的指令
+        if "幫我整理" in user_text or "幫我總結" in user_text or user_text.strip().startswith("總結") or user_text.strip().startswith("請總結"):
+            # 直接對 user_sessions 內容進行總結
+            messages = user_sessions.get(user_id, {}).get("messages", [])
+            summary = generate_story_summary(messages)
+            if summary:
+                paragraphs = extract_story_paragraphs(summary)
+                story_paragraphs[user_id] = paragraphs
+                story_summaries[user_id] = summary
+                illustration_mode[user_id] = True
+                story_current_paragraph[user_id] = 0
+                first_paragraph = paragraphs[0] if paragraphs else ""
+                # 推送整理內容和插圖起點
+                reply_msgs = [
+                    TextSendMessage(text="小繪看到你的故事構思了！讓我幫你整理一下：\n\n" + summary),
+                    TextSendMessage(
+                        text=f"故事整理完成！我們可以開始生成插圖了。\n\n第一段故事內容是：\n{first_paragraph}\n\n你可以描述這張圖有什麼元素，或直接說「幫我畫」我也會自動生成！"
+                    )
+                ]
+                line_bot_api.reply_message(reply_token, reply_msgs)
+                return
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="總結失敗，請再試一次！"))
+                return
 
         # 正式故事創作階段：逐段收集
         if not illustration_mode.get(user_id, False):
@@ -208,7 +233,7 @@ def handle_message(event):
                 line_bot_api.reply_message(
                     reply_token,
                     TextSendMessage(
-                        text=f"故事完成囉！我們可以開始生成插圖了。\n\n第一段故事是：\n{first_paragraph}\n\n你可以描述這張圖上有什麼元素，或直接說「幫我畫」我也會自動生成！"
+                        text=f"故事整理完成！我們可以開始生成插圖了。\n\n第一段故事內容是：\n{first_paragraph}\n\n你可以描述這張圖有什麼元素，或直接說「幫我畫」我也會自動生成！"
                     )
                 )
                 return
@@ -228,11 +253,10 @@ def handle_message(event):
 
         # 插圖生成階段
         if illustration_mode.get(user_id, False):
-            # 新增：允許用戶直接將故事段落內容寫在 prompt 裡，自動補齊 story_paragraphs
+            # 允許用戶直接將故事段落內容寫在 prompt 裡，自動補齊 story_paragraphs
             match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)?(?:第([一二三四五12345])段)?[：:\.，, ]*(.*)", user_text)
             current_paragraph = story_current_paragraph.get(user_id, 0)
             manual_select = False
-            extra_desc = ""
             story_content = ""
             if match:
                 paragraph_group = match.group(1)
@@ -254,7 +278,6 @@ def handle_message(event):
                 if possible_content and story_paragraphs[user_id][current_paragraph] == "":
                     story_paragraphs[user_id][current_paragraph] = possible_content
                 story_content = story_paragraphs[user_id][current_paragraph]
-                extra_desc = ""  # 若用戶已把內容當成段落，則不再額外附加
             else:
                 # 無法解析段落，預設用目前段落
                 if user_id in story_paragraphs and len(story_paragraphs[user_id]) > current_paragraph:
@@ -268,7 +291,7 @@ def handle_message(event):
                 return
 
             # 組裝 prompt
-            final_prompt = story_content if not extra_desc else f"{story_content}。{extra_desc}"
+            final_prompt = story_content
 
             image_url = generate_dalle_image(final_prompt, user_id)
             print(f"產生圖片 URL: {image_url}")
