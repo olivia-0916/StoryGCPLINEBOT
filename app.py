@@ -150,17 +150,43 @@ def handle_message(event):
 
         # 練習模式：用戶要求畫圖，直接進入插圖流程
         if practice_mode.get(user_id, False):
-            if re.search(r'第[一二三四五12345]段', user_text) or re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)", user_text):
+            # 如果用戶明確要求畫「第X段故事」的圖，自動切換到正式模式
+            if re.search(r'第[一二三四五12345]段', user_text):
                 practice_mode[user_id] = False
                 illustration_mode[user_id] = True
                 story_current_paragraph[user_id] = 0
-                # 直接執行插圖流程
-            else:
-                assistant_reply = get_openai_response(user_id, user_text)
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
-                save_to_firebase(user_id, "user", user_text)
-                save_to_firebase(user_id, "assistant", assistant_reply)
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，現在進入正式故事插圖創作模式！請再說一次你想畫哪一段故事的插圖，或直接描述你想畫的內容。"))
                 return
+            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
+            if match:
+                prompt = match.group(1).strip()
+                if not prompt:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="請告訴我你想畫什麼內容喔！"))
+                    return
+                print(f"🔔 generate_dalle_image prompt: {prompt}")
+                image_url = generate_dalle_image(prompt, user_id)
+                if image_url:
+                    reply_messages = [
+                        TextSendMessage(text=f"這是你練習畫的圖片："),
+                        ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
+                        TextSendMessage(text="你覺得這張圖怎麼樣？還想再畫其他東西嗎？")
+                    ]
+                    line_bot_api.reply_message(reply_token, reply_messages)
+                    save_to_firebase(user_id, "user", user_text)
+                    for msg in reply_messages:
+                        if isinstance(msg, TextSendMessage):
+                            save_to_firebase(user_id, "assistant", msg.text)
+                        elif isinstance(msg, ImageSendMessage):
+                            save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
+                else:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，小繪畫不出這張圖喔，換個描述試試看吧～"))
+                return
+            # 其他練習模式下的對話
+            assistant_reply = get_openai_response(user_id, user_text)
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
+            save_to_firebase(user_id, "user", user_text)
+            save_to_firebase(user_id, "assistant", assistant_reply)
+            return
 
         # 若故事段落已經集滿五段，自動進入插圖模式，推送第一段內容
         if not illustration_mode.get(user_id, False) and len(story_paragraphs.get(user_id, [])) == 5:
@@ -305,7 +331,9 @@ base_system_prompt = """
 你是「小繪」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
 請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
 
-第一階段：故事創作引導，請以「如果我有一個超能力」為主題，引導使用者想像一位主角、他擁有什麼超能力、他在哪裡、遇到什麼事件、解決了什麼問題等，故事共五段。每次請你只回應一段故事，不要一次補完全部段落，等使用者回覆後再繼續進行下一段。請等待使用者輸入下一段內容。
+第一階段：故事創作引導，請以「如果我有一個超能力」為主題，**只能用問題或鼓勵語句引導使用者一步步描述主角、能力、場景、事件等，不能自己創作故事內容，也不能直接給出故事開頭或細節。**
+
+不要主導故事，保持引導與陪伴。
 
 第二階段：插圖引導，幫助使用者描述畫面，生成的插圖上不要有故事的文字，並在完成後詢問是否需調整。
 
