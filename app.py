@@ -222,7 +222,13 @@ def handle_message(event):
                 
                 # 儲存到 Firebase
                 save_to_firebase(user_id, "user", user_text)
-                save_to_firebase(user_id, "assistant", f"第 {current_paragraph + 1} 段故事插圖：{image_url}")
+                
+                # 儲存小繪的所有訊息
+                for msg in reply_messages:
+                    if isinstance(msg, TextSendMessage):
+                        save_to_firebase(user_id, "assistant", msg.text)
+                    elif isinstance(msg, ImageSendMessage):
+                        save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
             else:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
             return
