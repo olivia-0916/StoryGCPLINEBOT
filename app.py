@@ -156,7 +156,15 @@ def handle_message(event):
 
         # 練習模式：用戶直接要求畫圖，生成練習用圖片，訊息固定
         if practice_mode.get(user_id, False):
-            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)\s*(.+)", user_text)
+            # 如果用戶明確要求畫「第X段故事」的圖，自動切換到正式模式
+            if re.search(r'第[一二三四五12345]段', user_text):
+                practice_mode[user_id] = False
+                illustration_mode[user_id] = True
+                story_current_paragraph[user_id] = 0
+                # 可以給一個提示
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，現在進入正式故事插圖創作模式！請再說一次你想畫哪一段故事的插圖，或直接描述你想畫的內容。"))
+                return
+            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
             if match:
                 prompt = match.group(1).strip()
                 print(f"🔔 generate_dalle_image prompt: {prompt}")
