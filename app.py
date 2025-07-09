@@ -190,7 +190,6 @@ def handle_message(event):
             match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
             if match:
                 prompt = match.group(1).strip()
-
                 # 嘗試從使用者輸入中提取段落編號（中文或數字）
                 paragraph_match = re.search(r'第[一二三四五12345]段', user_text)
                 if paragraph_match:
@@ -201,16 +200,25 @@ def handle_message(event):
                         current_paragraph = chinese_to_number[num_char] - 1
                     else:
                         current_paragraph = int(num_char) - 1
+                    manual_select = True
                 else:
-                    # 沒指定段落就用目前段落
                     current_paragraph = story_current_paragraph.get(user_id, 0)
+                    manual_select = False
 
                 # 檢查段落範圍
                 if current_paragraph < 0 or current_paragraph >= 5:
                     line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
                     return
 
-                image_url = generate_dalle_image(prompt, user_id)
+                # 取得該段故事內容
+                story_content = ""
+                if user_id in story_paragraphs and 0 <= current_paragraph < len(story_paragraphs[user_id]):
+                    story_content = story_paragraphs[user_id][current_paragraph]
+
+                # 合成 prompt
+                final_prompt = f"{story_content} {prompt}".strip()
+                image_url = generate_dalle_image(final_prompt, user_id)
+
                 if image_url:
                     reply_messages = [
                         TextSendMessage(text=f"這是第 {current_paragraph + 1} 段故事的插圖："),
@@ -218,9 +226,9 @@ def handle_message(event):
                         TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？")
                     ]
 
-                    # 提議下一段插圖（如果還有剩段落）
+                    # 提議下一段插圖（如果還有剩段落且不是手動指定）
                     next_paragraph = current_paragraph + 1
-                    if next_paragraph < 5 and user_id in story_paragraphs and len(story_paragraphs[user_id]) >= 5:
+                    if not manual_select and next_paragraph < 5 and user_id in story_paragraphs and len(story_paragraphs[user_id]) >= 5:
                         next_story_content = story_paragraphs[user_id][next_paragraph]
                         next_prompt = (
                             f"要不要繼續畫第 {next_paragraph + 1} 段故事的插圖呢？\n\n"
@@ -229,12 +237,11 @@ def handle_message(event):
                         )
                         reply_messages.append(TextSendMessage(text=next_prompt))
                         story_current_paragraph[user_id] = next_paragraph
-                    else:
+                    elif not manual_select and next_paragraph >= 5:
                         reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
-                        illustration_mode[user_id] = False  # 結束插圖模式
+                        illustration_mode[user_id] = False
 
                     line_bot_api.reply_message(reply_token, reply_messages)
-
                     save_to_firebase(user_id, "user", user_text)
                     for msg in reply_messages:
                         if isinstance(msg, TextSendMessage):
