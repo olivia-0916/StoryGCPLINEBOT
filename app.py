@@ -135,8 +135,8 @@ def handle_message(event):
     print(f"🔍 目前 practice_mode: {practice_mode.get(user_id)}, illustration_mode: {illustration_mode.get(user_id)}")
 
     try:
-        # --- 偵測「一起來講故事吧」指令，切換到正式創作階段 ---
-        if "一起來講故事吧" in user_text:
+        # --- 偵測「一起來講故事吧」或「我們來講故事吧」指令，切換到正式創作階段 ---
+        if "一起來講故事吧" in user_text or "我們來講故事吧" in user_text:
             reset_story_memory(user_id)
             practice_mode[user_id] = False
             illustration_mode[user_id] = False
@@ -144,7 +144,7 @@ def handle_message(event):
             story_paragraphs[user_id] = []
             line_bot_api.reply_message(
                 reply_token,
-                TextSendMessage(text="太好了，我們開始講故事囉！請告訴我第一段故事內容，每次只說一段，等你說下一段時再繼續。")
+                TextSendMessage(text="太好了，我們開始講故事囉！這次的主題是『如果我有一個超能力』，你會想像自己有什麼超能力呢？可以先告訴我主角的名字和能力喔！")
             )
             return
 
