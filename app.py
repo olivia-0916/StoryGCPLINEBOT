@@ -157,9 +157,10 @@ def handle_message(event):
                 story_current_paragraph[user_id] = 0
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，現在進入正式故事插圖創作模式！請再說一次你想畫哪一段故事的插圖，或直接描述你想畫的內容。"))
                 return
-            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
+            # 修正：畫圖指令用 re.match 並加上 ^
+            match = re.match(r"^(請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
             if match:
-                prompt = match.group(1).strip()
+                prompt = match.group(2).strip()
                 if not prompt:
                     line_bot_api.reply_message(reply_token, TextSendMessage(text="請告訴我你想畫什麼內容喔！"))
                     return
