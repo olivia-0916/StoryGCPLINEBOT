@@ -231,9 +231,9 @@ def handle_message(event):
 
         # --- 正式故事創作階段，插圖生成 ---
         if illustration_mode.get(user_id, False):
-            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
+            match = re.match(r"^(請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
             if match:
-                prompt = match.group(1).strip()
+                prompt = match.group(2).strip()
                 # 嘗試從使用者輸入中提取段落編號（中文或數字）
                 paragraph_match = re.search(r'第[一二三四五12345]段', user_text)
                 if paragraph_match:
@@ -261,9 +261,12 @@ def handle_message(event):
 
                 # 如果用戶描述內容為空，直接用故事內容
                 if not prompt:
+                    if not story_content:
+                        line_bot_api.reply_message(reply_token, TextSendMessage(text="這段故事內容還沒寫好，請先補充故事再畫圖喔！"))
+                        return
                     final_prompt = story_content
                 else:
-                    final_prompt = f"{story_content} {prompt}".strip()
+                    final_prompt = f"{story_content} {prompt}".strip() if story_content else prompt
                 image_url = generate_dalle_image(final_prompt, user_id)
 
                 if image_url:
