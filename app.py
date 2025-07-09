@@ -17,9 +17,7 @@ from firebase_admin import credentials, firestore
 import base64
 import random
 
-
 sys.stdout.reconfigure(encoding='utf-8')
-#測試是否有git
 app = Flask(__name__)
 print("✅ Flask App initialized")
 
@@ -145,12 +143,12 @@ def handle_message(event):
         # --- 新增：偵測「一起來講故事吧」指令，切換到正式創作階段 ---
         if "一起來講故事吧" in user_text:
             practice_mode[user_id] = False
-            illustration_mode[user_id] = True
+            illustration_mode[user_id] = False  # 修正：進入故事創作模式先不要直接進入插畫模式
             story_current_paragraph[user_id] = 0
-            # 你可以這裡給使用者一個引導訊息
+            story_paragraphs[user_id] = []  # 新增：清空舊段落
             line_bot_api.reply_message(
                 reply_token,
-                TextSendMessage(text="太好了，我們開始講故事囉！請告訴我第一段故事內容，或告訴我你想畫什麼圖片。")
+                TextSendMessage(text="太好了，我們開始講故事囉！請告訴我第一段故事內容，每次只說一段，等你說下一段時再繼續。")
             )
             return
 
@@ -161,7 +159,6 @@ def handle_message(event):
                 practice_mode[user_id] = False
                 illustration_mode[user_id] = True
                 story_current_paragraph[user_id] = 0
-                # 可以給一個提示
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，現在進入正式故事插圖創作模式！請再說一次你想畫哪一段故事的插圖，或直接描述你想畫的內容。"))
                 return
             match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
@@ -193,11 +190,57 @@ def handle_message(event):
             save_to_firebase(user_id, "assistant", assistant_reply)
             return
 
-        # 正式故事創作階段，插圖生成
-        if illustration_mode.get(user_id, False):
+        # 正式故事創作階段
+        if not illustration_mode.get(user_id, False):
+            # 進行故事分段創作，一次一段
+            # 先判斷是否已經完成五段
+            current_paragraph = story_current_paragraph.get(user_id, 0)
+            if current_paragraph >= 5:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="五段故事已經完成囉！如果想畫插圖，可以說「幫我畫第X段」或「請畫…」"))
+                return
+
+            # 檢查是否是要求畫圖指令
             match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
             if match:
+                # 若直接說「請畫」也自動切到插圖模式
+                illustration_mode[user_id] = True
+                # 重新呼叫 handle_message 進入插圖邏輯
+                handle_message(event)
+                return
+
+            # 否則當成故事段落輸入
+            # 新增判斷：避免 AI 一次補全部段落
+            # 只將使用者輸入直接當作該段，存進 story_paragraphs
+            if user_id not in story_paragraphs:
+                story_paragraphs[user_id] = []
+            if len(story_paragraphs[user_id]) < current_paragraph + 1:
+                story_paragraphs[user_id].append(user_text)
+            else:
+                story_paragraphs[user_id][current_paragraph] = user_text
+
+            save_to_firebase(user_id, "user", user_text)
+
+            # 回覆鼓勵+提示是否要繼續下一段
+            if current_paragraph < 4:
+                prompt = [
+                    "謝謝你分享這一段故事！",
+                    f"請繼續說第{current_paragraph+2}段故事內容，等你說下一段時再繼續喔。"
+                ]
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="\n".join(prompt)))
+                story_current_paragraph[user_id] = current_paragraph + 1
+            else:
+                # 已經第五段
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="五段故事已完成！如果想畫插圖，可以說「幫我畫第X段」或「請畫…」"))
+                story_current_paragraph[user_id] = 5
+            return
+
+        # 插圖生成階段
+        if illustration_mode.get(user_id, False):
+            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
+            print(f"進入插畫模式：match={match}")
+            if match:
                 prompt = match.group(1).strip()
+                print(f"插圖 prompt: {prompt}")
                 # 嘗試從使用者輸入中提取段落編號（中文或數字）
                 paragraph_match = re.search(r'第[一二三四五12345]段', user_text)
                 if paragraph_match:
@@ -226,6 +269,7 @@ def handle_message(event):
                 # 合成 prompt
                 final_prompt = f"{story_content} {prompt}".strip()
                 image_url = generate_dalle_image(final_prompt, user_id)
+                print(f"產生圖片 URL: {image_url}")
 
                 if image_url:
                     reply_messages = [
@@ -275,7 +319,6 @@ def handle_message(event):
         traceback.print_exc()
         line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪出了一點小狀況，請稍後再試 🙇"))
 
-
 def save_to_firebase(user_id, role, text):
     try:
         user_doc_ref = db.collection("users").document(user_id)
@@ -292,8 +335,7 @@ base_system_prompt = """
 你是「小繪」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
 請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
 
-第一階段：故事創作引導，請以「如果我有一個超能力」為主題，引導使用者想像一位主角、他擁有什麼超能力、他在哪裡、遇到什麼事件、解決了什麼問題，逐步發展成五段故事。
-不要主導故事，保持引導與陪伴。
+第一階段：故事創作引導，請以「如果我有一個超能力」為主題，引導使用者想像一位主角、他擁有什麼超能力、他在哪裡、遇到什麼事件、解決了什麼問題等，故事共五段。每次請你只回應一段故事，不要一次補完全部段落，等使用者回覆後再繼續進行下一段。請等待使用者輸入下一段內容。
 
 第二階段：插圖引導，幫助使用者描述畫面，生成的插圖上不要有故事的文字，並在完成後詢問是否需調整。
 
@@ -342,7 +384,10 @@ def get_openai_response(user_id, user_message):
     if summary_context:
         prompt_with_summary += f"\n\n【故事摘要】\n{summary_context}\n請根據以上摘要，延續創作對話內容。"
 
-    # ✅ 正向語句集，避免重複與 summary 混用
+    # 新增明確限制AI只寫一段
+    current_paragraph = story_current_paragraph.get(user_id, 0)
+    prompt_with_summary += f"\n\n現在是第{current_paragraph+1}段，請一次只寫一段故事，不要一次補完全部段落，等使用者輸入下一段內容再繼續。"
+
     encouragement_suffix = random.choice([
         "你剛剛的描述真的很棒喔 🌟",
         "我喜歡你用的那個比喻 👏",
@@ -395,16 +440,13 @@ def extract_title_from_reply(reply_text):
 
 def generate_dalle_image(prompt, user_id):
     try:
-        # 檢查是否已經生成過圖片
         if user_id in story_image_urls and prompt in story_image_urls[user_id]:
             return story_image_urls[user_id][prompt]  # 返回已經儲存的圖片
 
-        # 如果沒有生成過圖片，則生成新圖片
         print(f"🖍️ 產生圖片中：{prompt}")
-        # 強化 prompt，明確要求不要有任何文字
         enhanced_prompt = f"""
 {prompt}
-No text, no words, no letters, no captions, no numbers, no Chinese or English characters, no signage, no handwriting, no subtitles, no labels, no written language, no symbols, no logos, no watermark, no title, no description, no book cover text. Only pure illustration.
+No text, no words, no letters, no captions, no numbers, no Chinese or English characters, no signage, no handwriting, no subtitles, no labels, no written language, no symbols, no logos, no watermark, only illustration.
 請不要在圖片中加入任何文字、標題、數字、標誌、字幕、說明、書名、描述、手寫字、符號或水印，只要純粹的插畫畫面。
 """.strip()
         response = openai.Image.create(
@@ -416,24 +458,16 @@ No text, no words, no letters, no captions, no numbers, no Chinese or English ch
         image_url = response['data'][0]['url']
         print(f"✅ 產生圖片成功：{image_url}")
         
-        # 儲存圖片 URL
         if user_id not in story_image_urls:
             story_image_urls[user_id] = {}
-        story_image_urls[user_id][prompt] = image_url  # 儲存每個用戶的圖片 URL 和 prompt
+        story_image_urls[user_id][prompt] = image_url
         
-        # 下載並上傳到 Imgur
         try:
-            # 下載圖片
             print("⬇️ 開始下載圖片...")
             img_data = requests.get(image_url).content
             print("✅ 圖片下載完成")
-            
-            # 上傳到 Imgur
             print("💾 開始上傳到 Imgur...")
-            # 將圖片轉換為 base64
             img_base64 = base64.b64encode(img_data).decode('utf-8')
-            
-            # 準備上傳資料
             url = "https://api.imgur.com/3/image"
             headers = {
                 "Authorization": f"Client-ID {IMGUR_CLIENT_ID}"
@@ -441,37 +475,30 @@ No text, no words, no letters, no captions, no numbers, no Chinese or English ch
             data = {
                 "image": img_base64,
                 "type": "base64",
-                "privacy": "hidden"  # 設定為私有
+                "privacy": "hidden"
             }
-            
-            # 上傳圖片
             response = requests.post(url, headers=headers, data=data)
             response_data = response.json()
-            
             if response.status_code == 200 and response_data['success']:
                 imgur_url = response_data['data']['link']
-                deletehash = response_data['data']['deletehash']  # 儲存刪除雜湊值
+                deletehash = response_data['data']['deletehash']
                 print(f"✅ 圖片已上傳到 Imgur：{imgur_url}")
-                
-                # 儲存圖片 URL 和刪除雜湊值到 Firestore
                 user_doc_ref = db.collection("users").document(user_id)
                 user_doc_ref.collection("images").add({
                     "url": imgur_url,
-                    "deletehash": deletehash,  # 儲存刪除雜湊值
+                    "deletehash": deletehash,
                     "prompt": prompt,
                     "timestamp": firestore.SERVER_TIMESTAMP
                 })
                 print("✅ 圖片資訊已儲存到 Firestore")
-                
                 return imgur_url
             else:
                 print(f"❌ Imgur API 回應錯誤：{response_data}")
-                return image_url  # 如果 Imgur 上傳失敗，返回原始 URL
-            
+                return image_url
         except Exception as e:
             print(f"❌ 上傳圖片到 Imgur 失敗：{e}")
             traceback.print_exc()
-            return image_url  # 如果 Imgur 上傳失敗，返回原始 URL
+            return image_url
         
     except Exception as e:
         print("❌ 產生圖片失敗：", e)
@@ -481,31 +508,23 @@ No text, no words, no letters, no captions, no numbers, no Chinese or English ch
 @app.route("/story/<user_id>")
 def view_story(user_id):
     try:
-        # 從 Firebase 獲取使用者資料
         user_doc_ref = db.collection("users").document(user_id)
         images = user_doc_ref.collection("images").order_by("timestamp").get()
         chat = user_doc_ref.collection("chat").order_by("timestamp").get()
-        
-        # 整理資料
         story_data = {
             "title": story_titles.get(user_id, "我們的故事"),
             "summary": story_summaries.get(user_id, ""),
             "images": [],
             "content": []
         }
-        
-        # 處理圖片
         for img in images:
             story_data["images"].append({
                 "url": img.get("url"),
                 "prompt": img.get("prompt")
             })
-            
-        # 處理對話內容
         for msg in chat:
             if msg.get("role") == "assistant":
                 story_data["content"].append(msg.get("text"))
-        
         return render_template("story.html", story=story_data)
     except Exception as e:
         print(f"❌ 讀取故事失敗：{e}")
@@ -514,31 +533,23 @@ def view_story(user_id):
 @app.route("/api/story/<user_id>")
 def get_story_data(user_id):
     try:
-        # 從 Firebase 獲取使用者資料
         user_doc_ref = db.collection("users").document(user_id)
         images = user_doc_ref.collection("images").order_by("timestamp").get()
         chat = user_doc_ref.collection("chat").order_by("timestamp").get()
-        
-        # 整理資料
         story_data = {
             "title": story_titles.get(user_id, "我們的故事"),
             "summary": story_summaries.get(user_id, ""),
             "images": [],
             "content": []
         }
-        
-        # 處理圖片
         for img in images:
             story_data["images"].append({
                 "url": img.get("url"),
                 "prompt": img.get("prompt")
             })
-            
-        # 處理對話內容
         for msg in chat:
             if msg.get("role") == "assistant":
                 story_data["content"].append(msg.get("text"))
-        
         return jsonify(story_data)
     except Exception as e:
         print(f"❌ 讀取故事失敗：{e}")
@@ -547,4 +558,3 @@ def get_story_data(user_id):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-    
