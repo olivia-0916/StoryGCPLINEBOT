@@ -267,7 +267,21 @@ def handle_message(event):
                     final_prompt = story_content
                 else:
                     final_prompt = f"{story_content} {prompt}".strip() if story_content else prompt
-                image_url = generate_dalle_image(final_prompt, user_id)
+                # 防呆：檢查 final_prompt 長度
+                if not final_prompt or len(final_prompt.strip()) < 10:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="這段故事內容太短，請補充描述再試一次！"))
+                    return
+                # debug print
+                print(f"[DEBUG] story_paragraphs[{user_id}]: {story_paragraphs.get(user_id)}")
+                print(f"[DEBUG] current_paragraph: {current_paragraph}")
+                print(f"[DEBUG] story_content: '{story_content}'")
+                print(f"[DEBUG] final_prompt: '{final_prompt}'")
+                try:
+                    image_url = generate_dalle_image(final_prompt, user_id)
+                except Exception as e:
+                    print(f"❌ DALL·E API 錯誤：{e}")
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text=f"DALL·E API 錯誤：{e}"))
+                    return
 
                 if image_url:
                     reply_messages = [
