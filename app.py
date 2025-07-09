@@ -148,16 +148,15 @@ def handle_message(event):
             )
             return
 
-        # 練習模式：用戶要求畫圖，直接進入插圖流程
-        if practice_mode.get(user_id, False):
-            # 如果用戶明確要求畫「第X段故事」的圖，自動切換到正式模式
+        # --- 正式創作前，優先判斷畫圖指令 ---
+        if practice_mode.get(user_id, True):
+            # 只要還沒進入正式創作，優先判斷畫圖指令
             if re.search(r'第[一二三四五12345]段', user_text):
                 practice_mode[user_id] = False
                 illustration_mode[user_id] = True
                 story_current_paragraph[user_id] = 0
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，現在進入正式故事插圖創作模式！請再說一次你想畫哪一段故事的插圖，或直接描述你想畫的內容。"))
                 return
-            # 修正：畫圖指令用 re.match 並加上 ^
             match = re.match(r"^(請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
             if match:
                 prompt = match.group(2).strip()
@@ -182,7 +181,7 @@ def handle_message(event):
                 else:
                     line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，小繪畫不出這張圖喔，換個描述試試看吧～"))
                 return
-            # 其他練習模式下的對話
+            # 其他情況才進入 AI 對話
             assistant_reply = get_openai_response(user_id, user_text)
             line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
             save_to_firebase(user_id, "user", user_text)
