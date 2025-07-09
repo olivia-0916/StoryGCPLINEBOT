@@ -156,9 +156,10 @@ def handle_message(event):
 
         # 練習模式：用戶直接要求畫圖，生成練習用圖片，訊息固定
         if practice_mode.get(user_id, False):
-            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
+            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)\s*(.+)", user_text)
             if match:
                 prompt = match.group(1).strip()
+                print(f"🔔 generate_dalle_image prompt: {prompt}")
                 image_url = generate_dalle_image(prompt, user_id)
                 if image_url:
                     reply_messages = [
