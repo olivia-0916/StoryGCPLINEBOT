@@ -141,34 +141,44 @@ def handle_message(event):
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
-        # 檢查是否包含「開始說故事」的關鍵字
-        if re.search(r"(開始說故事|說個故事|講個故事|說一個故事|講一個故事)", user_text):
-            reset_story_memory(user_id)
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，讓我們開始創作一個新的故事吧！主題是「如果我有一個超能力」，你想到的是哪一種超能力呢？"))
+        # 練習模式特別處理：插圖命令直接生成對應圖片，不用帶故事段落
+        if practice_mode.get(user_id, False):
+            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
+            if match:
+                prompt = match.group(1).strip()
+                image_url = generate_dalle_image(prompt, user_id)
+                if image_url:
+                    reply_messages = [
+                        TextSendMessage(text=f"這是你練習畫的圖片："),
+                        ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
+                        TextSendMessage(text="你覺得這張圖怎麼樣？還想再畫其他東西嗎？")
+                    ]
+                    line_bot_api.reply_message(reply_token, reply_messages)
+                    save_to_firebase(user_id, "user", user_text)
+                    for msg in reply_messages:
+                        if isinstance(msg, TextSendMessage):
+                            save_to_firebase(user_id, "assistant", msg.text)
+                        elif isinstance(msg, ImageSendMessage):
+                            save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
+                else:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，小繪畫不出這張圖喔，換個描述試試看吧～"))
+                return
+
+            # 練習模式下其他文字處理可以直接呼叫 GPT，或特殊設計
+            assistant_reply = get_openai_response(user_id, user_text)
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
+            save_to_firebase(user_id, "user", user_text)
+            save_to_firebase(user_id, "assistant", assistant_reply)
             return
 
-        # 檢查是否要求總結故事
-        if re.search(r"(幫我統整|整理|總結|歸納|目前的故事)", user_text):
-            if user_id not in user_sessions or not user_sessions[user_id]["messages"]:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="目前還沒有故事內容可以總結喔！"))
-                return
-                
-            summary = generate_story_summary(user_sessions[user_id]["messages"])
-            if summary:
-                # 儲存故事段落
-                story_paragraphs[user_id] = extract_story_paragraphs(summary)
-                # 進入插圖模式
-                illustration_mode[user_id] = True
-                story_current_paragraph[user_id] = 0
-                
-                # 在總結後加入插圖階段的提議
-                formatted_summary = "以下是目前的故事內容：\n\n" + summary + "\n\n故事已經完成了！要不要開始為故事畫插圖呢？我們可以從第一段故事開始，請告訴我你想要如何描繪第一段故事的場景？"
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=formatted_summary))
-                save_to_firebase(user_id, "user", user_text)
-                save_to_firebase(user_id, "assistant", formatted_summary)
-            else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我現在無法總結故事，請稍後再試。"))
-            return
+        # 非練習模式：原本故事流程
+        # 你的既有故事生成和插圖流程...
+
+    except Exception as e:
+        print("❌ 發生錯誤：", e)
+        traceback.print_exc()
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪出了一點小狀況，請稍後再試 🙇"))
+
 
         # 處理插圖生成請求
         match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
