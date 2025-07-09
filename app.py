@@ -401,13 +401,12 @@ def generate_dalle_image(prompt, user_id):
 
         # 如果沒有生成過圖片，則生成新圖片
         print(f"🖍️ 產生圖片中：{prompt}")
-        # 修改提示詞，確保不會生成文字
+        # 強化 prompt，明確要求不要有任何文字
         enhanced_prompt = f"""
-        Create a beautiful, detailed illustration for a children's story. {prompt}
-        Do NOT include any text, letters, captions, labels, signage, numbers, or written words in the image.
-        The image should be purely visual, no text of any kind.
-        """.strip()       
-
+{prompt}
+No text, no words, no letters, no captions, no numbers, no Chinese or English characters, no signage, no handwriting, no subtitles, no labels, no written language, no symbols, no logos, no watermark, no title, no description, no book cover text. Only pure illustration.
+請不要在圖片中加入任何文字、標題、數字、標誌、字幕、說明、書名、描述、手寫字、符號或水印，只要純粹的插畫畫面。
+""".strip()
         response = openai.Image.create(
             model="dall-e-3",
             prompt=enhanced_prompt,
