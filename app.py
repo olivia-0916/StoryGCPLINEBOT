@@ -49,6 +49,7 @@ story_image_urls = {}
 story_current_paragraph = {}
 story_paragraphs = {}
 illustration_mode = {}
+practice_mode = {}
 
 @app.route("/")
 def index():
@@ -58,33 +59,35 @@ def index():
 def callback():
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
+
+        # ✅ 檢查是否為新使用者，若是，初始化練習模式
+        events = json.loads(body).get("events", [])
+        for event in events:
+            if event.get("type") == "message":
+                user_id = event["source"]["userId"]
+                if user_id not in user_sessions:
+                    reset_story_memory(user_id)
+                    print(f"👋 使用者 {user_id} 第一次互動，自動進入練習模式")
+
     except InvalidSignatureError:
         abort(400)
     return "OK"
 
 def reset_story_memory(user_id):
-    """重置使用者的故事相關記憶"""
-    if user_id in user_sessions:
-        user_sessions[user_id] = {"messages": []}
-    if user_id in user_message_counts:
-        user_message_counts[user_id] = 0
-    if user_id in story_summaries:
-        story_summaries[user_id] = ""
-    if user_id in story_titles:
-        story_titles[user_id] = ""
-    if user_id in story_image_prompts:
-        story_image_prompts[user_id] = ""
-    if user_id in story_image_urls:
-        story_image_urls[user_id] = {}
-    if user_id in story_current_paragraph:
-        story_current_paragraph[user_id] = 0
-    if user_id in story_paragraphs:
-        story_paragraphs[user_id] = []
-    if user_id in illustration_mode:
-        illustration_mode[user_id] = False
-    print(f"✅ 已重置使用者 {user_id} 的故事記憶")
+    user_sessions[user_id] = {"messages": []}
+    user_message_counts[user_id] = 0
+    story_summaries[user_id] = ""
+    story_titles[user_id] = ""
+    story_image_prompts[user_id] = ""
+    story_image_urls[user_id] = {}
+    story_current_paragraph[user_id] = 0
+    story_paragraphs[user_id] = []
+    illustration_mode[user_id] = False
+    practice_mode[user_id] = True
+    print(f"✅ 使用者 {user_id} 的故事記憶已重置並啟用練習模式")
 
 def generate_story_summary(messages):
     """根據對話歷史生成故事總結"""
@@ -321,7 +324,7 @@ def get_openai_response(user_id, user_message):
         "慢慢來，小繪在這裡陪你 😊"
     ])
 
-    recent_history = user_sessions[user_id]["messages"][-30:]
+    recent_history = user_sessions[user_id]["messages"][-70:]
     messages = [{"role": "system", "content": prompt_with_summary}] + recent_history
 
     try:
