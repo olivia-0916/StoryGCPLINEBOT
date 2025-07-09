@@ -61,7 +61,6 @@ def callback():
     try:
         handler.handle(body, signature)
 
-        # ✅ 檢查是否為新使用者，若是，初始化練習模式
         events = json.loads(body).get("events", [])
         for event in events:
             if event.get("type") == "message":
@@ -88,7 +87,6 @@ def reset_story_memory(user_id):
     print(f"✅ 使用者 {user_id} 的故事記憶已重置並啟用練習模式")
 
 def generate_story_summary(messages):
-    """根據對話歷史生成故事總結"""
     try:
         summary_prompt = """
 請將以下對話內容整理成五個段落的故事情節，每個段落用數字標記（1. 2. 3. 4. 5.）。
@@ -113,7 +111,6 @@ def generate_story_summary(messages):
             {"role": "user", "content": "以下是故事對話內容："},
             *messages
         ]
-        
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=messages_for_summary,
@@ -125,11 +122,9 @@ def generate_story_summary(messages):
         return None
 
 def extract_story_paragraphs(summary):
-    """從故事摘要中提取5段故事內容"""
     paragraphs = [p.strip() for p in summary.split('\n') if p.strip()]
-    # 移除段落編號
     clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in paragraphs]
-    return clean_paragraphs[:5]  # 確保只返回5段
+    return clean_paragraphs[:5]
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -140,8 +135,9 @@ def handle_message(event):
     print(f"🔍 目前 practice_mode: {practice_mode.get(user_id)}, illustration_mode: {illustration_mode.get(user_id)}")
 
     try:
-        # --- 新增：偵測「一起來講故事吧」指令，切換到正式創作階段 ---
+        # --- 偵測「一起來講故事吧」指令，切換到正式創作階段 ---
         if "一起來講故事吧" in user_text:
+            reset_story_memory(user_id)
             practice_mode[user_id] = False
             illustration_mode[user_id] = False
             story_current_paragraph[user_id] = 0
@@ -152,82 +148,36 @@ def handle_message(event):
             )
             return
 
-        # 練習模式：用戶直接要求畫圖，生成練習用圖片，訊息固定
+        # 練習模式：用戶要求畫圖，直接進入插圖流程
         if practice_mode.get(user_id, False):
-            # 如果用戶明確要求畫「第X段故事」的圖或畫圖指令，自動切換到正式模式，直接進入插圖流程
             if re.search(r'第[一二三四五12345]段', user_text) or re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)", user_text):
                 practice_mode[user_id] = False
                 illustration_mode[user_id] = True
                 story_current_paragraph[user_id] = 0
-                match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
-                if match:
-                    prompt = match.group(1).strip()
-                    paragraph_match = re.search(r'第[一二三四五12345]段', user_text)
-                    if paragraph_match:
-                        chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
-                        p = paragraph_match.group(0)
-                        num_char = p[1]
-                        if num_char in chinese_to_number:
-                            current_paragraph = chinese_to_number[num_char] - 1
-                        else:
-                            current_paragraph = int(num_char) - 1
-                        manual_select = True
-                    else:
-                        current_paragraph = story_current_paragraph.get(user_id, 0)
-                        manual_select = False
+                # 直接執行插圖流程
+                # 直接跳到插圖流程，不回覆多餘提示
+            else:
+                assistant_reply = get_openai_response(user_id, user_text)
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
+                save_to_firebase(user_id, "user", user_text)
+                save_to_firebase(user_id, "assistant", assistant_reply)
+                return
 
-                    if current_paragraph < 0 or current_paragraph >= 5:
-                        line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
-                        return
-
-                    story_content = ""
-                    if user_id in story_paragraphs and 0 <= current_paragraph < len(story_paragraphs[user_id]):
-                        story_content = story_paragraphs[user_id][current_paragraph]
-
-                    final_prompt = f"{story_content} {prompt}".strip()
-                    image_url = generate_dalle_image(final_prompt, user_id)
-
-                    if image_url:
-                        reply_messages = [
-                            TextSendMessage(text=f"這是第 {current_paragraph + 1} 段故事的插圖："),
-                            ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
-                            TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？")
-                        ]
-                        next_paragraph = current_paragraph + 1
-                        if not manual_select and next_paragraph < 5 and user_id in story_paragraphs and len(story_paragraphs[user_id]) >= 5:
-                            next_story_content = story_paragraphs[user_id][next_paragraph]
-                            next_prompt = (
-                                f"要不要繼續畫第 {next_paragraph + 1} 段故事的插圖呢？\n\n"
-                                f"第 {next_paragraph + 1} 段故事內容是：\n{next_story_content}\n\n"
-                                "請告訴我你想要如何描繪這個場景？"
-                            )
-                            reply_messages.append(TextSendMessage(text=next_prompt))
-                            story_current_paragraph[user_id] = next_paragraph
-                        elif not manual_select and next_paragraph >= 5:
-                            reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
-                            illustration_mode[user_id] = False
-
-                        line_bot_api.reply_message(reply_token, reply_messages)
-                        save_to_firebase(user_id, "user", user_text)
-                        for msg in reply_messages:
-                            if isinstance(msg, TextSendMessage):
-                                save_to_firebase(user_id, "assistant", msg.text)
-                            elif isinstance(msg, ImageSendMessage):
-                                save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
-                    else:
-                        line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
-                    return
-
-            # 練習模式下的其他對話
-            assistant_reply = get_openai_response(user_id, user_text)
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
-            save_to_firebase(user_id, "user", user_text)
-            save_to_firebase(user_id, "assistant", assistant_reply)
+        # 若故事段落已經集滿五段，自動進入插圖模式，推送第一段內容
+        if not illustration_mode.get(user_id, False) and len(story_paragraphs.get(user_id, [])) == 5:
+            illustration_mode[user_id] = True
+            story_current_paragraph[user_id] = 0
+            first_paragraph = story_paragraphs[user_id][0]
+            line_bot_api.reply_message(
+                reply_token,
+                TextSendMessage(
+                    text=f"故事完成囉！我們可以開始生成插圖了。\n\n第一段故事是：\n{first_paragraph}\n\n你可以描述這張圖上有什麼元素，或直接說「幫我畫」我也會自動生成！"
+                )
+            )
             return
 
-        # 正式故事創作階段
+        # 正式故事創作階段：逐段收集
         if not illustration_mode.get(user_id, False):
-            # 進行故事分段創作，一次一段
             current_paragraph = story_current_paragraph.get(user_id, 0)
             if current_paragraph >= 5:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="五段故事已經完成囉！如果想畫插圖，可以說「幫我畫第X段」或「請畫…」"))
@@ -240,7 +190,7 @@ def handle_message(event):
                 handle_message(event)
                 return
 
-            # 否則當成故事段落輸入
+            # 收集故事段落
             if user_id not in story_paragraphs:
                 story_paragraphs[user_id] = []
             if len(story_paragraphs[user_id]) < current_paragraph + 1:
@@ -250,83 +200,98 @@ def handle_message(event):
 
             save_to_firebase(user_id, "user", user_text)
 
-            if current_paragraph < 4:
-                prompt = [
-                    "謝謝你分享這一段故事！",
-                    f"請繼續說第{current_paragraph+2}段故事內容，等你說下一段時再繼續喔。"
-                ]
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="\n".join(prompt)))
-                story_current_paragraph[user_id] = current_paragraph + 1
+            if len(story_paragraphs[user_id]) == 5:
+                # 自動總結
+                story_summaries[user_id] = "\n".join(story_paragraphs[user_id])
+                illustration_mode[user_id] = True
+                story_current_paragraph[user_id] = 0
+                first_paragraph = story_paragraphs[user_id][0]
+                line_bot_api.reply_message(
+                    reply_token,
+                    TextSendMessage(
+                        text=f"故事完成囉！我們可以開始生成插圖了。\n\n第一段故事是：\n{first_paragraph}\n\n你可以描述這張圖上有什麼元素，或直接說「幫我畫」我也會自動生成！"
+                    )
+                )
+                return
             else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="五段故事已完成！如果想畫插圖，可以說「幫我畫第X段」或「請畫…」"))
-                story_current_paragraph[user_id] = 5
-            return
+                current_paragraph = story_current_paragraph[user_id]
+                if current_paragraph < 4:
+                    prompt = [
+                        "謝謝你分享這一段故事！",
+                        f"請繼續說第{current_paragraph+2}段故事內容，等你說下一段時再繼續喔。"
+                    ]
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="\n".join(prompt)))
+                    story_current_paragraph[user_id] = current_paragraph + 1
+                else:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="五段故事已完成！如果想畫插圖，可以說「幫我畫第X段」或「請畫…」"))
+                    story_current_paragraph[user_id] = 5
+                return
 
         # 插圖生成階段
         if illustration_mode.get(user_id, False):
-            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
-            print(f"進入插畫模式：match={match}")
+            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)?(?:第([一二三四五12345])段)?(.*)", user_text)
+            current_paragraph = story_current_paragraph.get(user_id, 0)
+            manual_select = False
+            extra_desc = ""
             if match:
-                prompt = match.group(1).strip()
-                print(f"插圖 prompt: {prompt}")
-                paragraph_match = re.search(r'第[一二三四五12345]段', user_text)
-                if paragraph_match:
+                # 解析段落
+                paragraph_group = match.group(1)
+                extra_desc = match.group(2).strip()
+                if paragraph_group:
                     chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
-                    p = paragraph_match.group(0)
-                    num_char = p[1]
+                    num_char = paragraph_group
                     if num_char in chinese_to_number:
                         current_paragraph = chinese_to_number[num_char] - 1
                     else:
                         current_paragraph = int(num_char) - 1
                     manual_select = True
-                else:
-                    current_paragraph = story_current_paragraph.get(user_id, 0)
-                    manual_select = False
 
-                if current_paragraph < 0 or current_paragraph >= 5:
-                    line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
-                    return
-
-                story_content = ""
-                if user_id in story_paragraphs and 0 <= current_paragraph < len(story_paragraphs[user_id]):
-                    story_content = story_paragraphs[user_id][current_paragraph]
-
-                final_prompt = f"{story_content} {prompt}".strip()
-                image_url = generate_dalle_image(final_prompt, user_id)
-                print(f"產生圖片 URL: {image_url}")
-
-                if image_url:
-                    reply_messages = [
-                        TextSendMessage(text=f"這是第 {current_paragraph + 1} 段故事的插圖："),
-                        ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
-                        TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？")
-                    ]
-
-                    next_paragraph = current_paragraph + 1
-                    if not manual_select and next_paragraph < 5 and user_id in story_paragraphs and len(story_paragraphs[user_id]) >= 5:
-                        next_story_content = story_paragraphs[user_id][next_paragraph]
-                        next_prompt = (
-                            f"要不要繼續畫第 {next_paragraph + 1} 段故事的插圖呢？\n\n"
-                            f"第 {next_paragraph + 1} 段故事內容是：\n{next_story_content}\n\n"
-                            "請告訴我你想要如何描繪這個場景？"
-                        )
-                        reply_messages.append(TextSendMessage(text=next_prompt))
-                        story_current_paragraph[user_id] = next_paragraph
-                    elif not manual_select and next_paragraph >= 5:
-                        reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
-                        illustration_mode[user_id] = False
-
-                    line_bot_api.reply_message(reply_token, reply_messages)
-                    save_to_firebase(user_id, "user", user_text)
-                    for msg in reply_messages:
-                        if isinstance(msg, TextSendMessage):
-                            save_to_firebase(user_id, "assistant", msg.text)
-                        elif isinstance(msg, ImageSendMessage):
-                            save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
-                else:
-                    line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
+            # 取出該段故事內容
+            if user_id not in story_paragraphs or len(story_paragraphs[user_id]) <= current_paragraph:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=f"你還沒說過第{current_paragraph+1}段故事內容，請先補上再畫圖喔！"))
                 return
+            story_content = story_paragraphs[user_id][current_paragraph]
+            # 組裝 prompt
+            if extra_desc:
+                final_prompt = f"{story_content}。{extra_desc}"
+            else:
+                final_prompt = story_content
 
+            image_url = generate_dalle_image(final_prompt, user_id)
+            print(f"產生圖片 URL: {image_url}")
+
+            if image_url:
+                reply_messages = [
+                    TextSendMessage(text=f"這是第 {current_paragraph + 1} 段故事的插圖："),
+                    ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
+                    TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？")
+                ]
+                # 自動推下一段
+                next_paragraph = current_paragraph + 1
+                if next_paragraph < 5 and user_id in story_paragraphs and len(story_paragraphs[user_id]) >= 5:
+                    next_story_content = story_paragraphs[user_id][next_paragraph]
+                    next_prompt = (
+                        f"接下來是第{next_paragraph+1}段故事：\n{next_story_content}\n\n"
+                        "請描述你想要看到哪些畫面元素，或直接說「幫我畫」我也會自動生成！"
+                    )
+                    reply_messages.append(TextSendMessage(text=next_prompt))
+                    story_current_paragraph[user_id] = next_paragraph
+                elif next_paragraph >= 5:
+                    reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
+                    illustration_mode[user_id] = False
+
+                line_bot_api.reply_message(reply_token, reply_messages)
+                save_to_firebase(user_id, "user", user_text)
+                for msg in reply_messages:
+                    if isinstance(msg, TextSendMessage):
+                        save_to_firebase(user_id, "assistant", msg.text)
+                    elif isinstance(msg, ImageSendMessage):
+                        save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
+            return
+
+        # 其他狀況：一般對話
         assistant_reply = get_openai_response(user_id, user_text)
         if not assistant_reply:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時卡住了，請稍後再試 🌧️"))
@@ -377,7 +342,6 @@ def get_openai_response(user_id, user_message):
     if user_id not in story_current_paragraph:
         story_current_paragraph[user_id] = 0
 
-    # ✅ 檢查低參與輸入，回應鼓勵語
     low_engagement_inputs = ["不知道", "沒靈感", "嗯", "算了", "不想說", "先跳過", "跳過這題"]
     if any(phrase in user_message.strip().lower() for phrase in low_engagement_inputs):
         assistant_reply = random.choice([
@@ -406,7 +370,6 @@ def get_openai_response(user_id, user_message):
     if summary_context:
         prompt_with_summary += f"\n\n【故事摘要】\n{summary_context}\n請根據以上摘要，延續創作對話內容。"
 
-    # 新增明確限制AI只寫一段
     current_paragraph = story_current_paragraph.get(user_id, 0)
     prompt_with_summary += f"\n\n現在是第{current_paragraph+1}段，請一次只寫一段故事，不要一次補完全部段落，等使用者輸入下一段內容再繼續。"
 
@@ -429,7 +392,6 @@ def get_openai_response(user_id, user_message):
         assistant_reply = response.choices[0].message["content"]
         assistant_reply = format_reply(assistant_reply)
 
-        # ✅ 非總結類才加入鼓勵語
         if "故事名稱" not in assistant_reply and "總結" not in assistant_reply:
             assistant_reply += f"\n\n{encouragement_suffix}"
 
@@ -462,7 +424,6 @@ def extract_title_from_reply(reply_text):
 
 def generate_dalle_image(prompt, user_id):
     try:
-        # 不再用 prompt 做快取，永遠呼叫新圖
         print(f"🖍️ 產生圖片中：{prompt}")
         enhanced_prompt = f"""
 {prompt}
@@ -478,7 +439,6 @@ No text, no words, no letters, no captions, no numbers, no Chinese or English ch
         image_url = response['data'][0]['url']
         print(f"✅ 產生圖片成功：{image_url}")
 
-        # 儲存所有生成過的圖片
         if user_id not in story_image_urls:
             story_image_urls[user_id] = {}
         if prompt not in story_image_urls[user_id]:
@@ -522,7 +482,6 @@ No text, no words, no letters, no captions, no numbers, no Chinese or English ch
             print(f"❌ 上傳圖片到 Imgur 失敗：{e}")
             traceback.print_exc()
             return image_url
-        
     except Exception as e:
         print("❌ 產生圖片失敗：", e)
         traceback.print_exc()
