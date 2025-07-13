@@ -51,7 +51,6 @@ practice_mode = {}
 # === 黑名單用戶列表 ===
 BLOCKED_USER_IDS = {
     "U8a43896832cd20319724feab60c5e8cf",
-    "U3ef417599e84f8288b1677f75d4fe276"
 }
 
 # === Base System Prompt ===
