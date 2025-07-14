@@ -278,7 +278,7 @@ def format_reply(text):
     return re.sub(r'([。！？])\s*', r'\1\n', text)
 
 def get_openai_response(user_id, user_message, encouragement_suffix=""):
-    if user_id not in user_sessions:
+    if user_id not in user_sessions or "messages" not in user_sessions[user_id]:
         user_sessions[user_id] = {"messages": [], "story_mode": False}
     if user_id not in user_message_counts:
         user_message_counts[user_id] = 0
