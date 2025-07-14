@@ -337,8 +337,8 @@ def get_openai_response(user_id, user_message, encouragement_suffix=""):
             messages=messages,
             temperature=0.7,
         )
-        assistant_reply = response.choices[0].message["content"]
-        assistant_reply = format_reply(assistant_reply)
+        raw_reply = response.choices[0].message["content"]  # 原始 GPT 回傳
+        assistant_reply = format_reply(raw_reply)             # 給用戶看的格式
 
         # 非總結類的消息加上鼓勵語
         if encouragement_suffix:
@@ -347,12 +347,11 @@ def get_openai_response(user_id, user_message, encouragement_suffix=""):
         user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
 
         if user_message_counts[user_id] == 30:
-            summary = assistant_reply  # 直接用 GPT 回傳的五段內容
-            title = extract_title_from_reply(assistant_reply)
+            summary = raw_reply  # 用原始未處理的內容
+            title = extract_title_from_reply(raw_reply)
             story_summaries[user_id] = summary
             story_titles[user_id] = title
             story_image_prompts[user_id] = f"故事名稱：{title}，主題是：{summary}"
-            # 新增：自動存下五段故事內容
             story_paragraphs[user_id] = extract_story_paragraphs(summary)
 
         return assistant_reply
