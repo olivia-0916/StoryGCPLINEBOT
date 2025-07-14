@@ -439,6 +439,12 @@ def get_openai_response(user_id, user_message):
         assistant_reply = response.choices[0].message["content"]
         assistant_reply = format_reply(assistant_reply)
 
+        # --- 自動加上編號 ---
+        if ("整理" in user_message or "總結" in user_message or "歸納" in user_message) and not re.search(r"^1[\.．]", assistant_reply, re.MULTILINE):
+            lines = [l for l in assistant_reply.strip().split('\n') if l.strip()]
+            if len(lines) >= 3:
+                assistant_reply = "\n".join([f"{i+1}. {l}" for i, l in enumerate(lines)])
+
         if "故事名稱" not in assistant_reply and "總結" not in assistant_reply:
             assistant_reply += f"\n\n{encouragement_suffix}"
 
