@@ -200,16 +200,22 @@ def handle_message(event):
                     ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
                     TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？")
                 ]
-                # 提議畫下一段
-                next_paragraph = current_paragraph + 1
-                if next_paragraph < 5 and user_id in story_paragraphs:
-                    next_story_content = story_paragraphs[user_id][next_paragraph]
-                    next_story_prompt = f"要不要繼續畫第 {next_paragraph + 1} 段故事的插圖呢？\n\n第 {next_paragraph + 1} 段故事內容是：\n{next_story_content}\n\n請告訴我你想要如何描繪這個場景？"
-                    reply_messages.append(TextSendMessage(text=next_story_prompt))
-                    story_current_paragraph[user_id] = next_paragraph
-                else:
+                # 修正：只有畫第五段才結束，其他都推送下一段
+                if current_paragraph == 4:
                     reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
                     illustration_mode[user_id] = False
+                else:
+                    next_paragraph = current_paragraph + 1
+                    if user_id in story_paragraphs and next_paragraph < len(story_paragraphs[user_id]):
+                        next_story_content = story_paragraphs[user_id][next_paragraph]
+                        next_story_prompt = (
+                            f"要不要繼續畫第 {next_paragraph + 1} 段故事的插圖呢？\n\n"
+                            f"第 {next_paragraph + 1} 段故事內容是：\n{next_story_content}\n\n"
+                            "你可以跟我描述這張圖上有什麼元素，或直接說『幫我畫第"
+                            f"{next_paragraph + 1}段故事的插圖』，我會根據故事內容自動生成。"
+                        )
+                        reply_messages.append(TextSendMessage(text=next_story_prompt))
+                        story_current_paragraph[user_id] = next_paragraph
 
                 line_bot_api.reply_message(reply_token, reply_messages)
                 save_to_firebase(user_id, "user", user_text)
