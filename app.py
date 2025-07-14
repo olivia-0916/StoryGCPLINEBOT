@@ -347,7 +347,7 @@ def get_openai_response(user_id, user_message, encouragement_suffix=""):
         user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
 
         if user_message_counts[user_id] == 30:
-            summary = extract_summary_from_reply(assistant_reply)
+            summary = assistant_reply  # 直接用 GPT 回傳的五段內容
             title = extract_title_from_reply(assistant_reply)
             story_summaries[user_id] = summary
             story_titles[user_id] = title
