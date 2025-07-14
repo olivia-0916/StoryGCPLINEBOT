@@ -175,6 +175,18 @@ def handle_message(event):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
                 return
 
+            # === 新增：如果還沒摘要，先自動摘要並拆段 ===
+            if (user_id not in story_paragraphs) or (not story_paragraphs[user_id]) or (len(story_paragraphs[user_id]) < 5):
+                # 用目前的對話歷史自動摘要
+                messages = user_sessions.get(user_id, {}).get("messages", [])
+                summary = generate_story_summary(messages)
+                if summary:
+                    story_paragraphs[user_id] = extract_story_paragraphs(summary)
+                    story_summaries[user_id] = summary
+                else:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時無法整理故事段落，請再試一次！"))
+                    return
+
             # 取得該段故事內容
             story_content = ""
             if user_id in story_paragraphs and 0 <= current_paragraph < len(story_paragraphs[user_id]):
