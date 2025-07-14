@@ -278,7 +278,7 @@ def format_reply(text):
     return re.sub(r'([。！？])\s*', r'\1\n', text)
 
 def get_openai_response(user_id, user_message, encouragement_suffix=""):
-    if user_id not in user_sessions or "messages" not in user_sessions[user_id]:
+    if user_id not in user_sessions:
         user_sessions[user_id] = {"messages": [], "story_mode": False}
     if user_id not in user_message_counts:
         user_message_counts[user_id] = 0
@@ -352,6 +352,8 @@ def get_openai_response(user_id, user_message, encouragement_suffix=""):
             story_summaries[user_id] = summary
             story_titles[user_id] = title
             story_image_prompts[user_id] = f"故事名稱：{title}，主題是：{summary}"
+            # 新增：自動存下五段故事內容
+            story_paragraphs[user_id] = extract_story_paragraphs(summary)
 
         return assistant_reply
 
