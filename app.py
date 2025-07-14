@@ -442,7 +442,8 @@ def get_openai_response(user_id, user_message):
         # --- 自動加上編號 ---
         if ("整理" in user_message or "總結" in user_message or "歸納" in user_message) and not re.search(r"^1[\.．]", assistant_reply, re.MULTILINE):
             lines = [l for l in assistant_reply.strip().split('\n') if l.strip()]
-            if len(lines) >= 3:
+            # 只 enumerate 每行都超過 10 字，且至少 3 行的內容
+            if len(lines) >= 3 and all(len(l) >= 10 for l in lines):
                 assistant_reply = "\n".join([f"{i+1}. {l}" for i, l in enumerate(lines)])
 
         if "故事名稱" not in assistant_reply and "總結" not in assistant_reply:
