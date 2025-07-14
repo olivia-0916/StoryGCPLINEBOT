@@ -49,6 +49,7 @@ story_image_urls = {}
 story_current_paragraph = {}
 story_paragraphs = {}
 illustration_mode = {}
+practice_mode = {}
 
 @app.route("/")
 def index():
@@ -64,29 +65,19 @@ def callback():
         abort(400)
     return "OK"
 
+# === 工具函數 ===
 def reset_story_memory(user_id):
-    """重置使用者的故事相關記憶"""
-    if user_id in user_sessions:
-        user_sessions[user_id] = {"messages": []}
-    if user_id in user_message_counts:
-        user_message_counts[user_id] = 0
-    if user_id in story_summaries:
-        story_summaries[user_id] = ""
-    if user_id in story_titles:
-        story_titles[user_id] = ""
-    if user_id in story_image_prompts:
-        story_image_prompts[user_id] = ""
-    if user_id in story_image_urls:
-        story_image_urls[user_id] = {}
-    if user_id in story_current_paragraph:
-        story_current_paragraph[user_id] = 0
-    if user_id in story_paragraphs:
-        story_paragraphs[user_id] = []
-    if user_id in illustration_mode:
-        illustration_mode[user_id] = False
-    if user_id in user_sessions:
-        user_sessions[user_id]["story_mode"] = False  # 设置默认状态为非故事模式
-    print(f"✅ 已重置使用者 {user_id} 的故事记忆")
+    user_sessions[user_id] = {"messages": [], "story_mode": False}
+    user_message_counts[user_id] = 0
+    story_summaries[user_id] = ""
+    story_titles[user_id] = ""
+    story_image_prompts[user_id] = ""
+    story_image_urls[user_id] = {}
+    story_current_paragraph[user_id] = 0
+    story_paragraphs[user_id] = []
+    illustration_mode[user_id] = False
+    practice_mode[user_id] = True
+    print(f"✅ 已重置使用者 {user_id} 的故事記憶")
 
 def generate_story_summary(messages):
     """根據對話歷史生成故事總結"""
@@ -140,104 +131,27 @@ def handle_message(event):
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
-        # 检查是否包含「一起來講故事吧」的关键字
-        if re.search(r"(開始說故事|說故事|講個故事|說一個故事|講一個故事)", user_text):
+        # 進入故事模式
+        if re.search(r"(開始說故事|說故事|講個故事|說一個故事|講一個故事|一起來講故事吧|我們來講故事吧)", user_text):
             reset_story_memory(user_id)
-            user_sessions[user_id]["story_mode"] = True  # 设置 story_mode 为 True，表示进入故事创作模式
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，讓我們開始創作一個新的故事吧！主題是「如果我有一個超能力」，你想到的是哪一種超能力呢？"))
+            user_sessions[user_id]["story_mode"] = True
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text="太好了，我們開始講故事囉！主題是「如果我有一個超能力」，你想到的是哪一種超能力呢？"
+            ))
             return
 
-        # 檢查是否要求總結故事
-        if re.search(r"(幫我統整|整理|總結|歸納|目前的故事)", user_text):
-            if user_id not in user_sessions or not user_sessions[user_id]["messages"]:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="目前還沒有故事內容可以總結喔！"))
-                return
-                
-            summary = generate_story_summary(user_sessions[user_id]["messages"])
-            if summary:
-                # 儲存故事段落
-                story_paragraphs[user_id] = extract_story_paragraphs(summary)
-                # 進入插圖模式
-                illustration_mode[user_id] = True
-                story_current_paragraph[user_id] = 0
-                
-                # 在總結後加入插圖階段的提議
-                formatted_summary = "以下是目前的故事內容：\n\n" + summary + "\n\n故事已經完成了！要不要開始為故事畫插圖呢？我們可以從第一段故事開始，請告訴我你想要如何描繪第一段故事的場景？"
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=formatted_summary))
-                save_to_firebase(user_id, "user", user_text)
-                save_to_firebase(user_id, "assistant", formatted_summary)
-            else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，我現在無法總結故事，請稍後再試。"))
-            return
+        # 只在故事模式下加鼓勵語
+        encouragement_suffix = ""
+        if user_sessions.get(user_id, {}).get("story_mode", False):
+            encouragement_suffix = random.choice([
+                "你真的很有創意！我喜歡這個設計！🌟",
+                "非常好，我覺得這個想法很不錯！👏",
+                "繼續加油，你做得很棒！💪",
+                "你真是故事大師！😊"
+            ])
 
-        # 處理插圖生成請求
-        match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
-        if match:
-            prompt = match.group(1).strip()
-            
-            # 從使用者輸入中提取段落編號
-            paragraph_match = re.search(r'第[一二三四五12345]段|第一段|第二段|第三段|第四段|第五段', user_text)
-            if paragraph_match:
-                paragraph_text = paragraph_match.group(0)
-                # 將中文數字轉換為阿拉伯數字
-                chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
-                if paragraph_text[1] in chinese_to_number:
-                    current_paragraph = chinese_to_number[paragraph_text[1]] - 1
-                else:
-                    current_paragraph = int(paragraph_text[1]) - 1
-            else:
-                # 如果沒有指定段落，使用當前段落
-                current_paragraph = story_current_paragraph.get(user_id, 0)
-            
-            # 確保段落編號在有效範圍內
-            if current_paragraph < 0 or current_paragraph >= 5:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
-                return
-                
-            image_url = generate_dalle_image(prompt, user_id)
-            
-            if image_url:
-                # 構建回覆訊息
-                reply_messages = []
-                
-                # 第一條訊息：顯示當前插圖
-                reply_messages.append(TextSendMessage(text=f"這是第 {current_paragraph + 1} 段故事的插圖："))
-                reply_messages.append(ImageSendMessage(original_content_url=image_url, preview_image_url=image_url))
-                
-                # 第二條訊息：詢問是否需要調整
-                reply_messages.append(TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？"))
-                
-                # 第三條訊息：提議畫下一段
-                next_paragraph = current_paragraph + 1
-                if next_paragraph < 5 and user_id in story_paragraphs:
-                    next_story_content = story_paragraphs[user_id][next_paragraph]
-                    next_story_prompt = f"要不要繼續畫第 {next_paragraph + 1} 段故事的插圖呢？\n\n第 {next_paragraph + 1} 段故事內容是：\n{next_story_content}\n\n請告訴我你想要如何描繪這個場景？"
-                    reply_messages.append(TextSendMessage(text=next_story_prompt))
-                    # 更新當前段落
-                    story_current_paragraph[user_id] = next_paragraph
-                else:
-                    reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
-                    # 重置插圖模式
-                    illustration_mode[user_id] = False
+        assistant_reply = get_openai_response(user_id, user_text, encouragement_suffix)
 
-                # 發送所有訊息
-                line_bot_api.reply_message(reply_token, reply_messages)
-                
-                # 儲存到 Firebase
-                save_to_firebase(user_id, "user", user_text)
-                
-                # 儲存小繪的所有訊息
-                for msg in reply_messages:
-                    if isinstance(msg, TextSendMessage):
-                        save_to_firebase(user_id, "assistant", msg.text)
-                    elif isinstance(msg, ImageSendMessage):
-                        save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
-            else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
-            return
-
-        # 處理一般對話
-        assistant_reply = get_openai_response(user_id, user_text)
         if not assistant_reply:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時卡住了，請稍後再試 🌧️"))
             return
@@ -278,9 +192,9 @@ base_system_prompt = """
 def format_reply(text):
     return re.sub(r'([。！？])\s*', r'\1\n', text)
 
-def get_openai_response(user_id, user_message):
+def get_openai_response(user_id, user_message, encouragement_suffix=""):
     if user_id not in user_sessions:
-        user_sessions[user_id] = {"messages": []}
+        user_sessions[user_id] = {"messages": [], "story_mode": False}
     if user_id not in user_message_counts:
         user_message_counts[user_id] = 0
     if user_id not in story_summaries:
@@ -318,15 +232,15 @@ def get_openai_response(user_id, user_message):
         prompt_with_summary += f"\n\n【故事摘要】\n{summary_context}\n請根據以上摘要，延續創作對話內容。"
 
     # ✅ 正向語句集，避免重複與 summary 混用
-    encouragement_suffix = random.choice([
-        "你剛剛的描述真的很棒喔 🌟",
-        "我喜歡你用的那個比喻 👏",
-        "慢慢來，小繪在這裡陪你 😊",
-        "你真的很有创意！我喜欢这个设定！🌟",
-        "非常好，我觉得这个想法很不错！👏",
-        "继续加油，你做得很棒！💪",
-        "你真是一个故事大师！😊"
-    ])
+    # encouragement_suffix = random.choice([
+    #     "你剛剛的描述真的很棒喔 🌟",
+    #     "我喜歡你用的那個比喻 👏",
+    #     "慢慢來，小繪在這裡陪你 😊",
+    #     "你真的很有创意！我喜欢这个设定！🌟",
+    #     "非常好，我觉得这个想法很不错！👏",
+    #     "继续加油，你做得很棒！💪",
+    #     "你真是一个故事大师！😊"
+    # ])
 
     recent_history = user_sessions[user_id]["messages"][-30:]
     messages = [{"role": "system", "content": prompt_with_summary}] + recent_history
@@ -341,8 +255,8 @@ def get_openai_response(user_id, user_message):
         assistant_reply = response.choices[0].message["content"]
         assistant_reply = format_reply(assistant_reply)
 
-        # ✅ 非總結類才加入鼓勵語
-        if "故事名稱" not in assistant_reply and "總結" not in assistant_reply:
+        # 非總結類的消息加上鼓勵語
+        if encouragement_suffix:
             assistant_reply += f"\n\n{encouragement_suffix}"
 
         user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
