@@ -225,9 +225,9 @@ def handle_message(event):
                 # 插入第一段故事內容
                 first_paragraph = story_paragraphs[user_id][0] if user_id in story_paragraphs and story_paragraphs[user_id] else ""
                 formatted_summary = (
-                    "以下是目前的故事內容：\n\n" + summary +
-                    f"\n\n故事已經完成了！我們可以開始生成插圖了。\n第一段故事是：\n{first_paragraph}\n\n"
-                    "你可以跟我描述這張圖上有什麼元素，或直接說『幫我畫第一段故事的插圖』，我會根據故事內容自動生成。"
+                    f"以下是目前整理好的五段故事內容：\n\n{numbered_paragraphs}\n\n"
+                    "故事已經完成了，我們可以開始畫插圖了喔！\n"
+                    "告訴我你想先畫哪一段，或直接說『幫我畫第一段故事的插圖』也可以～"
                 )
                 line_bot_api.reply_message(reply_token, TextSendMessage(text=formatted_summary))
                 save_to_firebase(user_id, "user", user_text)
