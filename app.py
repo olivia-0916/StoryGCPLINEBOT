@@ -397,9 +397,8 @@ def generate_dalle_image(prompt, user_id):
         # 上傳到 GCS
         blob = bucket.blob(filename)
         blob.upload_from_string(img_data, content_type="image/png")
-        # 設定公開讀取權限
-        blob.make_public()
-        gcs_url = blob.public_url
+        # 不要再呼叫 blob.make_public()
+        gcs_url = f"https://storage.googleapis.com/{bucket_name}/{filename}"
         print(f"✅ 圖片已上傳到 GCS：{gcs_url}")
 
         # 儲存圖片 URL 到 Firestore
