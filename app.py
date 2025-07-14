@@ -16,6 +16,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import base64
 import random
+from google.cloud import storage
 
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -39,6 +40,11 @@ def get_firebase_credentials_from_env():
 
 firebase_admin.initialize_app(get_firebase_credentials_from_env())
 db = firestore.client()
+
+# 初始化 GCS client
+bucket_name = "storybotimage"
+gcs_client = storage.Client()
+bucket = gcs_client.bucket(bucket_name)
 
 user_sessions = {}
 user_message_counts = {}
@@ -367,19 +373,12 @@ def extract_title_from_reply(reply_text):
 
 def generate_dalle_image(prompt, user_id):
     try:
-        # 檢查是否已經生成過圖片
-        if user_id in story_image_urls and prompt in story_image_urls[user_id]:
-            return story_image_urls[user_id][prompt]  # 返回已經儲存的圖片
-
-        # 如果沒有生成過圖片，則生成新圖片
         print(f"🖍️ 產生圖片中：{prompt}")
-        # 修改提示詞，確保不會生成文字
         enhanced_prompt = f"""
-        Create a beautiful, detailed illustration for a children's story. {prompt}
-        Do NOT include any text, letters, captions, labels, signage, numbers, or written words in the image.
-        The image should be purely visual, no text of any kind.
-        """.strip()       
-
+        {prompt}
+        No text, no words, no letters, no captions, no numbers, no Chinese or English characters, no signage, no handwriting, no subtitles, no labels, no written language, no symbols, no logos, no watermark, only illustration.
+        請不要在圖片中加入任何文字、標題、數字、標誌、字幕、說明、書名、描述、手寫字、符號或水印，只要純粹的插畫畫面。
+        """.strip()
         response = openai.Image.create(
             model="dall-e-3",
             prompt=enhanced_prompt,
@@ -388,64 +387,32 @@ def generate_dalle_image(prompt, user_id):
         )
         image_url = response['data'][0]['url']
         print(f"✅ 產生圖片成功：{image_url}")
-        
-        # 儲存圖片 URL
-        if user_id not in story_image_urls:
-            story_image_urls[user_id] = {}
-        story_image_urls[user_id][prompt] = image_url  # 儲存每個用戶的圖片 URL 和 prompt
-        
-        # 下載並上傳到 Imgur
-        try:
-            # 下載圖片
-            print("⬇️ 開始下載圖片...")
-            img_data = requests.get(image_url).content
-            print("✅ 圖片下載完成")
-            
-            # 上傳到 Imgur
-            print("💾 開始上傳到 Imgur...")
-            # 將圖片轉換為 base64
-            img_base64 = base64.b64encode(img_data).decode('utf-8')
-            
-            # 準備上傳資料
-            url = "https://api.imgur.com/3/image"
-            headers = {
-                "Authorization": f"Client-ID {IMGUR_CLIENT_ID}"
-            }
-            data = {
-                "image": img_base64,
-                "type": "base64",
-                "privacy": "hidden"  # 設定為私有
-            }
-            
-            # 上傳圖片
-            response = requests.post(url, headers=headers, data=data)
-            response_data = response.json()
-            
-            if response.status_code == 200 and response_data['success']:
-                imgur_url = response_data['data']['link']
-                deletehash = response_data['data']['deletehash']  # 儲存刪除雜湊值
-                print(f"✅ 圖片已上傳到 Imgur：{imgur_url}")
-                
-                # 儲存圖片 URL 和刪除雜湊值到 Firestore
-                user_doc_ref = db.collection("users").document(user_id)
-                user_doc_ref.collection("images").add({
-                    "url": imgur_url,
-                    "deletehash": deletehash,  # 儲存刪除雜湊值
-                    "prompt": prompt,
-                    "timestamp": firestore.SERVER_TIMESTAMP
-                })
-                print("✅ 圖片資訊已儲存到 Firestore")
-                
-                return imgur_url
-            else:
-                print(f"❌ Imgur API 回應錯誤：{response_data}")
-                return image_url  # 如果 Imgur 上傳失敗，返回原始 URL
-            
-        except Exception as e:
-            print(f"❌ 上傳圖片到 Imgur 失敗：{e}")
-            traceback.print_exc()
-            return image_url  # 如果 Imgur 上傳失敗，返回原始 URL
-        
+
+        # 下載圖片
+        img_data = requests.get(image_url).content
+
+        # 產生唯一檔名
+        filename = f"{user_id}_{uuid.uuid4().hex}.png"
+
+        # 上傳到 GCS
+        blob = bucket.blob(filename)
+        blob.upload_from_string(img_data, content_type="image/png")
+        # 設定公開讀取權限
+        blob.make_public()
+        gcs_url = blob.public_url
+        print(f"✅ 圖片已上傳到 GCS：{gcs_url}")
+
+        # 儲存圖片 URL 到 Firestore
+        user_doc_ref = db.collection("users").document(user_id)
+        user_doc_ref.collection("images").add({
+            "url": gcs_url,
+            "prompt": prompt,
+            "timestamp": firestore.SERVER_TIMESTAMP
+        })
+        print("✅ 圖片資訊已儲存到 Firestore")
+
+        return gcs_url
+
     except Exception as e:
         print("❌ 產生圖片失敗：", e)
         traceback.print_exc()
