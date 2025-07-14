@@ -144,6 +144,10 @@ def handle_message(event):
                 "你真是故事大師！😊"
             ])
 
+        # === 新增：每段插圖記錄上一張 prompt ===
+        if 'last_image_prompt' not in user_sessions.get(user_id, {}):
+            user_sessions.setdefault(user_id, {})['last_image_prompt'] = {}
+
         # === 插圖生成分支 ===
         match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
         if match:
@@ -165,12 +169,28 @@ def handle_message(event):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
                 return
 
-            # 取得該段故事內容（可選：自動補全 prompt）
+            # 取得該段故事內容
             story_content = ""
             if user_id in story_paragraphs and 0 <= current_paragraph < len(story_paragraphs[user_id]):
                 story_content = story_paragraphs[user_id][current_paragraph]
-            if not prompt:
+
+            # === 新增：插圖細節修改 ===
+            last_prompt_dict = user_sessions.setdefault(user_id, {}).setdefault('last_image_prompt', {})
+            last_prompt = last_prompt_dict.get(current_paragraph, "")
+            # 如果用戶只輸入細節（如「把蘑菇改成紅色」），自動組合
+            if not prompt and story_content:
                 prompt = story_content
+            elif prompt and last_prompt:
+                # 若用戶只輸入細節（不含主體），自動組合
+                if len(prompt) < 20 and last_prompt:
+                    prompt = f"{last_prompt}，{prompt}，其他元素維持不變"
+            elif not prompt and last_prompt:
+                prompt = last_prompt
+            elif not prompt:
+                prompt = story_content
+
+            # 記錄本次 prompt
+            last_prompt_dict[current_paragraph] = prompt
 
             image_url = generate_dalle_image(prompt, user_id)
 
