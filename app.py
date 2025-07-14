@@ -139,7 +139,7 @@ def handle_message(event):
 
     try:
         # 檢查是否包含「開始說故事」的關鍵字
-        if re.search(r"(開始說故事|說個故事|講個故事|說一個故事|講一個故事)", user_text):
+        if re.search(r"(開始說故事|說故事|講個故事|說一個故事|講一個故事)", user_text):
             reset_story_memory(user_id)
             line_bot_api.reply_message(reply_token, TextSendMessage(text="好的，讓我們開始創作一個新的故事吧！主題是「如果我有一個超能力」，你想到的是哪一種超能力呢？"))
             return
