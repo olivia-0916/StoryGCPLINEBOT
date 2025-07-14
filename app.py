@@ -4,14 +4,15 @@ import os
 import json
 import traceback
 import re
-import uuid
 import requests
 from datetime import datetime
 from flask import Flask, request, abort, render_template, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
-from firebase_admin import firestore, storage
+from linebot.models import (
+    MessageEvent, TextMessage, TextSendMessage, ImageSendMessage,
+    FollowEvent
+)
 import firebase_admin
 from firebase_admin import credentials, firestore
 import base64
@@ -21,23 +22,23 @@ sys.stdout.reconfigure(encoding='utf-8')
 app = Flask(__name__)
 print("✅ Flask App initialized")
 
+# === 環境變數 ===
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS")
 IMGUR_CLIENT_ID = os.environ.get("IMGUR_CLIENT_ID")
-IMGUR_CLIENT_SECRET = os.environ.get("IMGUR_CLIENT_SECRET")
 
+# === LINE & OpenAI ===
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
 
-def get_firebase_credentials_from_env():
-    return credentials.Certificate(json.loads(FIREBASE_CREDENTIALS))
-
-firebase_admin.initialize_app(get_firebase_credentials_from_env())
+# === Firebase ===
+firebase_admin.initialize_app(credentials.Certificate(json.loads(FIREBASE_CREDENTIALS)))
 db = firestore.client()
 
+# === Sessions ===
 user_sessions = {}
 user_message_counts = {}
 story_summaries = {}
@@ -49,30 +50,37 @@ story_paragraphs = {}
 illustration_mode = {}
 practice_mode = {}
 
-@app.route("/")
-def index():
-    return "LINE GPT Webhook is running!"
+# === 黑名單用戶列表 ===
+BLOCKED_USER_IDS = {
+    "U8a43896832cd20319724feab60c5e8cf",
+}
 
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers.get("X-Line-Signature")
-    body = request.get_data(as_text=True)
+# === 歡迎引導文字 ===
+WELCOME_MESSAGE = (
+    "哈囉～很高興認識你！\n"
+    "我是小繪，很開心能陪你一起創作故事和插圖～\n\n"
+    "你可以先試試以下指令來認識我：\n"
+    "👉 問我「你是誰」\n"
+    "👉 說「幫我畫一隻小狗」\n"
+    "👉 之後也可以說「一起來講故事吧」開始真正的故事創作喔！\n"
+    "準備好了就告訴我吧～"
+)
 
-    try:
-        handler.handle(body, signature)
+# === Base System Prompt ===
+base_system_prompt = """
+你是「小繪」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
+請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
 
-        events = json.loads(body).get("events", [])
-        for event in events:
-            if event.get("type") == "message":
-                user_id = event["source"]["userId"]
-                if user_id not in user_sessions:
-                    reset_story_memory(user_id)
-                    print(f"👋 使用者 {user_id} 第一次互動，自動進入練習模式")
+第一階段：故事創作引導，請以「如果我有一個超能力」為主題，**只能用問題或鼓勵語句引導使用者一步步描述主角、能力、場景、事件等，不能自己創作故事內容，也不能直接給出故事開頭或細節。**
 
-    except InvalidSignatureError:
-        abort(400)
-    return "OK"
+不要主導故事，保持引導與陪伴。
 
+第二階段：插圖引導，幫助使用者描述畫面，生成的插圖上不要有故事的文字，並在完成後詢問是否需調整。
+
+請自稱「小繪」，以朋友般的語氣陪伴使用者完成創作。
+""".strip()
+
+# === 工具函數 ===
 def reset_story_memory(user_id):
     user_sessions[user_id] = {"messages": []}
     user_message_counts[user_id] = 0
@@ -84,47 +92,47 @@ def reset_story_memory(user_id):
     story_paragraphs[user_id] = []
     illustration_mode[user_id] = False
     practice_mode[user_id] = True
-    print(f"✅ 使用者 {user_id} 的故事記憶已重置並啟用練習模式")
+    print(f"✅ 已重置使用者 {user_id} 的故事記憶 (practice mode ON)")
 
-def extract_story_paragraphs(summary):
-    paragraphs = [p.strip() for p in summary.split('\n') if p.strip()]
-    clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in paragraphs]
-    return clean_paragraphs[:5]
+# === 主頁 Route ===
+@app.route("/")
+def index():
+    return "LINE GPT Webhook is running!"
 
-def generate_story_summary(messages):
+# === LINE Follow（加好友）事件 ===
+@handler.add(FollowEvent)
+def handle_follow(event):
+    user_id = event.source.user_id
+    print(f"👋 使用者 {user_id} 加了好友")
+    reset_story_memory(user_id)
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=WELCOME_MESSAGE)
+    )
+
+# === LINE Callback ===
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers.get("X-Line-Signature")
+    body = request.get_data(as_text=True)
+
     try:
-        summary_prompt = """
-請將以下對話內容整理成五個段落的故事情節，每個段落用數字標記（1. 2. 3. 4. 5.）。
-請遵循以下格式要求：
-1. 每個段落必須單獨一行
-2. 每個段落約20字左右
-3. 保持故事的連貫性
-4. 使用簡潔的文字描述
-5. 確保每個段落都清楚表達故事的重要情節
-
-範例格式：
-1. 小明在森林裡發現一隻受傷的小鳥。
-2. 他決定帶小鳥回家照顧。
-3. 經過細心照料，小鳥逐漸康復。
-4. 小鳥學會了飛行，但捨不得離開。
-5. 最後小鳥選擇留下來陪伴小明。
-
-請按照以上格式整理故事內容。
-"""
-        messages_for_summary = [
-            {"role": "system", "content": summary_prompt},
-            {"role": "user", "content": "以下是故事對話內容："},
-            *messages
-        ]
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=messages_for_summary,
-            temperature=0.7,
-        )
-        return response.choices[0].message["content"]
-    except Exception as e:
-        print("❌ 生成故事總結失敗：", e)
-        return None
+        handler.handle(body, signature)
+        events = json.loads(body).get("events", [])
+        for event in events:
+            if event.get("type") == "message":
+                user_id = event["source"]["userId"]
+                if user_id not in user_sessions:
+                    reset_story_memory(user_id)
+                    print(f"👋 使用者 {user_id} 第一次互動，自動進入練習模式")
+                    # 直接主動推送「歡迎引導」訊息
+                    line_bot_api.push_message(
+                        user_id,
+                        TextSendMessage(text=WELCOME_MESSAGE)
+                    )
+    except InvalidSignatureError:
+        abort(400)
+    return "OK"
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -400,9 +408,22 @@ def get_openai_response(user_id, user_message):
     prompt_with_summary += f"\n\n現在是第{current_paragraph+1}段，請一次只寫一段故事，不要一次補完全部段落，等使用者輸入下一段內容再繼續。"
 
     encouragement_suffix = random.choice([
-        "你剛剛的描述真的很棒喔 🌟",
-        "我喜歡你用的那個比喻 👏",
-        "慢慢來，小繪在這裡陪你 😊"
+        "你已經做得很好了 ❤️",
+        "很棒喔～慢慢來就好 🙂",
+        "不急，我會在這裡陪著你 🌿",
+        "這個想法很有趣 👌",
+        "慢慢想也沒關係喔～",
+        "嗯嗯，我懂的 🙂",
+        "可以再說說看喔～",
+        "還有什麼細節想加嗎？",
+        "小繪豎起耳朵在聽 👂✨",
+        "噗～我覺得這樣很可愛呀 🐣",
+        "小繪覺得很讚耶 👍",
+        "還想補充什麼呢？",
+        "我在聽，你慢慢說 🌱",
+        "如果不想說也沒關係喔 🙂",
+        "有任何想法都可以跟我分享 😊",
+        "還有別的想法嗎？",  
     ])
 
     recent_history = user_sessions[user_id]["messages"][-70:]
