@@ -48,10 +48,7 @@ story_paragraphs = {}
 illustration_mode = {}
 practice_mode = {}
 
-# === 黑名單用戶列表 ===
-BLOCKED_USER_IDS = {
-    "U8a43896832cd20319724feab60c5e8cf",
-}
+
 
 # === Base System Prompt ===
 base_system_prompt = """
@@ -279,15 +276,7 @@ def handle_message(event):
     user_text = event.message.text.strip()
     reply_token = event.reply_token
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
-    
-    # ✅ 黑名單檢查
-    if user_id in BLOCKED_USER_IDS:
-        print(f"🚫 封鎖用戶 {user_id} 嘗試發訊息")
-        line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text="您好，系統維護中，暫停使用，請見諒。")
-        )
-        return
+
         
     try:
         # === 初始化 / 練習模式 ===
