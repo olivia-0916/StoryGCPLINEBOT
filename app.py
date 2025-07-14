@@ -482,9 +482,11 @@ def generate_dalle_image(prompt, user_id):
         print(f"🖍️ 產生圖片中：{prompt}")
         enhanced_prompt = f"""
 {prompt}
-No text, no words, no letters, no captions, no numbers, no Chinese or English characters, no signage, no handwriting, no subtitles, no labels, no written language, no symbols, no logos, no watermark, only illustration.
+No text, no words, no letters, no captions, no numbers, no Chinese or English characters, no signage, no handwriting, 
+no subtitles, no labels, no written language, no symbols, no logos, no watermark, only illustration. 
 請不要在圖片中加入任何文字、標題、數字、標誌、字幕、說明、書名、描述、手寫字、符號或水印，只要純粹的插畫畫面。
 """.strip()
+        
         response = openai.Image.create(
             model="dall-e-3",
             prompt=enhanced_prompt,
