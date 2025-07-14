@@ -222,8 +222,8 @@ def handle_message(event):
                 illustration_mode[user_id] = True
                 story_current_paragraph[user_id] = 0
 
-                # 插入第一段故事內容
-                first_paragraph = story_paragraphs[user_id][0] if user_id in story_paragraphs and story_paragraphs[user_id] else ""
+                # 重新加上段落編號
+                numbered_paragraphs = "\n".join([f"{i+1}. {p}" for i, p in enumerate(story_paragraphs[user_id])])
                 formatted_summary = (
                     f"以下是目前整理好的五段故事內容：\n\n{numbered_paragraphs}\n\n"
                     "故事已經完成了，我們可以開始畫插圖了喔！\n"
@@ -423,7 +423,7 @@ def get_openai_response(user_id, user_message):
         "我在聽，你慢慢說 🌱",
         "如果不想說也沒關係喔 🙂",
         "有任何想法都可以跟我分享 😊",
-        "還有別的想法嗎？",  
+        "還有別的想法嗎？",
     ])
 
     recent_history = user_sessions[user_id]["messages"][-70:]
@@ -491,7 +491,7 @@ No text, no words, no letters, no captions, no numbers, no Chinese or English ch
         if prompt not in story_image_urls[user_id]:
             story_image_urls[user_id][prompt] = []
         story_image_urls[user_id][prompt].append(image_url)
-        
+
         try:
             print("⬇️ 開始下載圖片...")
             img_data = requests.get(image_url).content
