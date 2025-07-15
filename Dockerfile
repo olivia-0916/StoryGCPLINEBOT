@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 使用 Gunicorn 執行 Flask 應用，符合 Cloud Run 要求的 port
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app"]
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "--timeout", "60", "app:app"]
