@@ -169,7 +169,32 @@ def handle_message(event):
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
-        # === 封面生成分支 ===
+        # === 封面生成分支（允許直接觸發） ===
+        if re.search(r"封面", user_text):
+            cover_prompt = user_text.replace("幫我畫封面圖", "").replace("請畫封面", "").replace("畫封面", "").strip()
+            story_title = story_titles.get(user_id, "我們的故事")
+            story_summary = story_summaries.get(user_id, "")
+            optimized_prompt = optimize_image_prompt(story_summary, f"封面：{cover_prompt}，故事名稱：{story_title}")
+            if not optimized_prompt:
+                optimized_prompt = f"A beautiful, colorful storybook cover illustration. Title: {story_title}. {cover_prompt}. No text, no words, no letters."
+            image_url = generate_dalle_image(optimized_prompt, user_id)
+            if image_url:
+                reply_messages = [
+                    TextSendMessage(text="這是你故事的封面："),
+                    ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
+                    TextSendMessage(text="你滿意這個封面嗎？需要調整可以再描述一次喔！")
+                ]
+                line_bot_api.reply_message(reply_token, reply_messages)
+                save_to_firebase(user_id, "user", user_text)
+                for msg in reply_messages:
+                    if isinstance(msg, TextSendMessage):
+                        save_to_firebase(user_id, "assistant", msg.text)
+                    elif isinstance(msg, ImageSendMessage):
+                        save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這個封面，試試其他描述看看 🖍️"))
+            return
+        # === 封面生成分支（原本的，保留給 awaiting_cover 狀態） ===
         if user_sessions.get(user_id, {}).get("awaiting_cover", False):
             cover_prompt = user_text.strip()
             story_title = story_titles.get(user_id, "我們的故事")
@@ -321,6 +346,30 @@ def handle_message(event):
                         save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
             else:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
+            return
+
+        # === 故事標題生成分支 ===
+        if re.search(r"(取故事標題|幫我取故事標題|取標題|幫我想標題)", user_text):
+            story_summary = story_summaries.get(user_id, "")
+            if not story_summary:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="目前還沒有故事大綱，請先完成故事內容喔！"))
+                return
+            # 用 OpenAI 產生三個標題
+            title_prompt = f"請根據以下故事大綱，產生三個適合的故事書標題，每個不超過8字，並用1. 2. 3. 編號：\n{story_summary}"
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "你是一位擅長為故事取名的AI，請根據故事大綱產生三個簡潔有創意的故事書標題，每個不超過8字。"},
+                    {"role": "user", "content": title_prompt}
+                ],
+                temperature=0.7,
+            )
+            titles = response.choices[0].message["content"].strip()
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text=f"這裡有三個故事標題選項：\n{titles}\n\n請回覆你最喜歡的編號或直接輸入標題！"
+            ))
+            save_to_firebase(user_id, "user", user_text)
+            save_to_firebase(user_id, "assistant", f"故事標題選項：\n{titles}")
             return
 
         # === 一般對話分支 ===
@@ -577,4 +626,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
     
-
