@@ -250,7 +250,7 @@ def handle_message(event):
         assistant_reply = get_openai_response(user_id, user_text, encouragement_suffix)
 
         if not assistant_reply:
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時卡住了，請稍後再試 🌧️"))
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時卡住了，請稍後再試喔"))
             return
 
         line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
@@ -281,7 +281,7 @@ base_system_prompt = """
 第一階段：故事創作引導，請以「如果我有一個超能力」為主題，引導使用者想像一位主角、他擁有什麼超能力、他在哪裡、遇到什麼事件、解決了什麼問題，逐步發展成五段故事。
 不要主導故事，保持引導與陪伴。
 
-第二階段：插圖引導，幫助使用者描述畫面，生成的插圖上不要有故事的文字，並在完成後詢問是否需調整。
+第二階段：繪圖引導，幫助使用者描述畫面，生成的繪圖上不要有故事的文字，並在完成後詢問是否需調整。
 
 請自稱「小繪」，以朋友般的語氣陪伴使用者完成創作。
 """.strip()
@@ -390,7 +390,7 @@ def generate_dalle_image(prompt, user_id):
         enhanced_prompt = f"""
         {prompt}
         No text, no words, no letters, no captions, no numbers, no Chinese or English characters, no signage, no handwriting, no subtitles, no labels, no written language, no symbols, no logos, no watermark, only illustration.
-        請不要在圖片中加入任何文字、標題、數字、標誌、字幕、說明、書名、描述、手寫字、符號或水印，只要純粹的插畫畫面。
+        請不要在圖片中加入任何文字、標題、數字、標誌、字幕、說明、書名、描述、手寫字、符號或水印，只要純粹繪本圖片畫面。
         """.strip()
         response = openai.Image.create(
             model="dall-e-3",
