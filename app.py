@@ -222,18 +222,18 @@ def handle_message(event):
         if "封面" not in user_text:
             match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
             if match:
-            prompt = match.group(1).strip()
-            # 從使用者輸入中提取段落編號
-            paragraph_match = re.search(r'第[一二三四五12345]段|第一段|第二段|第三段|第四段|第五段', user_text)
-            if paragraph_match:
-                paragraph_text = paragraph_match.group(0)
-                chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
-                if paragraph_text[1] in chinese_to_number:
-                    current_paragraph = chinese_to_number[paragraph_text[1]] - 1
+                prompt = match.group(1).strip()
+                # 從使用者輸入中提取段落編號
+                paragraph_match = re.search(r'第[一二三四五12345]段|第一段|第二段|第三段|第四段|第五段', user_text)
+                if paragraph_match:
+                    paragraph_text = paragraph_match.group(0)
+                    chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
+                    if paragraph_text[1] in chinese_to_number:
+                        current_paragraph = chinese_to_number[paragraph_text[1]] - 1
+                    else:
+                        current_paragraph = int(paragraph_text[1]) - 1
                 else:
-                    current_paragraph = int(paragraph_text[1]) - 1
-            else:
-                current_paragraph = story_current_paragraph.get(user_id, 0)
+                    current_paragraph = story_current_paragraph.get(user_id, 0)
 
             # 檢查段落範圍
             if current_paragraph < 0 or current_paragraph >= 5:
