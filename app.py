@@ -86,11 +86,11 @@ def reset_story_memory(user_id):
     print(f"✅ 已重置使用者 {user_id} 的故事記憶")
 
 def generate_story_summary(messages):
-    """根據對話歷史生成故事總結"""
+    """根據對話歷史生成故事總結，只回傳五段純故事內容，不要有開場白、分隔線、標題等雜訊"""
     try:
         summary_prompt = """
-請將以下對話內容整理成五個段落的故事情節，每個段落用數字標記（1. 2. 3. 4. 5.）。
-每段直接是故事內容，不要加小標題，每段約25字。
+請將以下對話內容整理成五個段落的故事情節，每段直接是故事內容，不要加小標題、開場白、分隔線、標題、感謝語或任何說明文字，每段約25字。
+只要五段純故事內容，每段前面加數字（1. 2. 3. 4. 5.）。
 格式範例：
 1. 小明在森林裡發現一隻受傷的小鳥。
 2. 他決定帶小鳥回家照顧。
@@ -105,7 +105,6 @@ def generate_story_summary(messages):
             {"role": "user", "content": "以下是故事對話內容："},
             *messages
         ]
-        
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=messages_for_summary,
@@ -117,10 +116,15 @@ def generate_story_summary(messages):
         return None
 
 def extract_story_paragraphs(summary):
-    """從故事摘要中提取5段故事內容，過濾開場白"""
+    """從故事摘要中提取5段故事內容，過濾開場白與非故事內容"""
     paragraphs = [p.strip() for p in summary.split('\n') if p.strip()]
-    # 過濾掉明顯不是故事內容的開場白
-    filtered = [p for p in paragraphs if not re.match(r'^(好的|以下|讓我來|整理一下|故事如下|Summary|Here is|Here are)', p)]
+    # 過濾掉明顯不是故事內容的開場白、分隔線、標題、只有星號的行、粗體標題
+    filtered = [
+        p for p in paragraphs
+        if not re.match(r'^(好的|以下|讓我來|整理一下|故事如下|Summary|Here is|Here are|謝謝|---|\*\*故事標題)', p)
+        and not re.match(r'^\*+$', p)  # 只有星號的分隔線
+        and not re.match(r'^\*\*.*\*\*$', p)  # 粗體標題
+    ]
     # 移除段落編號
     clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in filtered]
     return clean_paragraphs[:5]  # 確保只返回5段
