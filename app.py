@@ -244,32 +244,27 @@ def handle_message(event):
             user_sessions.setdefault(user_id, {})['last_image_prompt'] = {}
 
         # === 插圖生成分支 ===
-        if "封面" not in user_text:
-            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
-            current_paragraph = story_current_paragraph.get(user_id, 0)  # 預設值
-            prompt = ""  # 預設值，避免 UnboundLocalError
-            if match:
-                prompt = match.group(1).strip()
-                # 從使用者輸入中提取段落編號
-                paragraph_match = re.search(r'第[一二三四五12345]段|第一段|第二段|第三段|第四段|第五段', user_text)
+        # 僅當訊息明確要求畫第X段故事的圖時才進入插圖分支
+        if re.search(r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)", user_text):
+            match = re.search(r"(幫我畫第([一二三四五12345])段故事的圖|請畫第([一二三四五12345])段故事的插圖|畫第([一二三四五12345])段故事的圖)", user_text)
+            current_paragraph = story_current_paragraph.get(user_id, 0)
+            prompt = ""
+            # 解析段落編號
+            paragraph_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
+            paragraph_num = None
+            for key in ['2', '3', '4', '5', '1']:
+                if match and match.group(int(key)):
+                    paragraph_num = match.group(int(key))
+                    break
+            if not paragraph_num:
+                # 用正則再抓一次
+                paragraph_match = re.search(r'[一二三四五12345]', user_text)
                 if paragraph_match:
-                    paragraph_text = paragraph_match.group(0)
-                    chinese_to_number = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5}
-                    if paragraph_text[1] in chinese_to_number:
-                        current_paragraph = chinese_to_number[paragraph_text[1]] - 1
-                    else:
-                        current_paragraph = int(paragraph_text[1]) - 1
-                else:
-                    current_paragraph = story_current_paragraph.get(user_id, 0)
-
-            # 檢查段落範圍
-            if current_paragraph < 0 or current_paragraph >= 5:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="抱歉，故事只有五段喔！請指定1-5段之間的段落。"))
-                return
-
+                    paragraph_num = paragraph_match.group(0)
+            if paragraph_num and paragraph_num in paragraph_map:
+                current_paragraph = paragraph_map[paragraph_num] - 1
             # === 新增：如果還沒摘要，先自動摘要並拆段 ===
             if (user_id not in story_paragraphs) or (not story_paragraphs[user_id]) or (len(story_paragraphs[user_id]) < 5):
-                # 用目前的對話歷史自動摘要
                 messages = user_sessions.get(user_id, {}).get("messages", [])
                 summary = generate_story_summary(messages)
                 if summary:
@@ -278,52 +273,33 @@ def handle_message(event):
                 else:
                     line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時無法整理故事段落，請再試一次！"))
                     return
-
             # 取得該段故事內容
             story_content = ""
             if user_id in story_paragraphs and 0 <= current_paragraph < len(story_paragraphs[user_id]):
                 story_content = story_paragraphs[user_id][current_paragraph]
-            # === Debug log ===
-            print("DEBUG story_paragraphs:", story_paragraphs.get(user_id))
-            print("DEBUG current_paragraph:", current_paragraph)
-            print("DEBUG story_content:", story_content)
-
-            # === 新增：插圖細節修改 ===
             last_prompt_dict = user_sessions.setdefault(user_id, {}).setdefault('last_image_prompt', {})
             last_prompt = last_prompt_dict.get(current_paragraph, "")
-            # 如果用戶只輸入細節（如「把蘑菇改成紅色」），自動組合
             if not prompt and story_content:
                 prompt = story_content
             elif prompt and last_prompt:
-                # 若用戶只輸入細節（不含主體），自動組合
                 if len(prompt) < 20 and last_prompt:
                     prompt = f"{last_prompt}，{prompt}，其他元素維持不變"
             elif not prompt and last_prompt:
                 prompt = last_prompt
             elif not prompt:
                 prompt = story_content
-
-            # 記錄本次 prompt
             last_prompt_dict[current_paragraph] = prompt
-
-            # === 新增：自動優化 prompt ===
             optimized_prompt = optimize_image_prompt(story_content, prompt)
             if not optimized_prompt:
-                # fallback
                 optimized_prompt = f"A colorful, soft, watercolor-style picture book illustration for children, no text, no words, no letters. Story: {story_content} {prompt}"
-
             image_url = generate_dalle_image(optimized_prompt, user_id)
-
             if image_url:
                 reply_messages = [
                     TextSendMessage(text=f"這是第 {current_paragraph + 1} 段故事的插圖："),
                     ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
                     TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？")
                 ]
-                # 修正：只有畫第五段才結束，其他都推送下一段
-                # 修正：畫完第五段就不再自動推封面
                 if current_paragraph == 4:
-                    # 第五段畫完就停在詢問調整，不主動進封面
                     illustration_mode[user_id] = False
                 else:
                     next_paragraph = current_paragraph + 1
@@ -337,8 +313,6 @@ def handle_message(event):
                         )
                         reply_messages.append(TextSendMessage(text=next_story_prompt))
                         story_current_paragraph[user_id] = next_paragraph
- 
-
                 line_bot_api.reply_message(reply_token, reply_messages)
                 save_to_firebase(user_id, "user", user_text)
                 for msg in reply_messages:
