@@ -293,11 +293,10 @@ def handle_message(event):
                     TextSendMessage(text="你覺得這張插圖怎麼樣？需要調整嗎？")
                 ]
                 # 修正：只有畫第五段才結束，其他都推送下一段
+                # 修正：畫完第五段就不再自動推封面
                 if current_paragraph == 4:
-                    reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
-                    reply_messages.append(TextSendMessage(text="現在，請幫這個故事設計一個封面吧。你希望封面有什麼主題或元素呢？"))
+                    # 第五段畫完就停在詢問調整，不主動進封面
                     illustration_mode[user_id] = False
-                    user_sessions[user_id]["awaiting_cover"] = True  # 新增封面狀態
                 else:
                     next_paragraph = current_paragraph + 1
                     if user_id in story_paragraphs and next_paragraph < len(story_paragraphs[user_id]):
@@ -307,9 +306,10 @@ def handle_message(event):
                             f"第 {next_paragraph + 1} 段故事內容是：\n{next_story_content}\n\n"
                             "你可以跟我描述這張圖上有什麼元素，或直接說『幫我畫第"
                             f"{next_paragraph + 1}段故事的插圖』，我會根據故事內容自動生成。"
-                        )
-                        reply_messages.append(TextSendMessage(text=next_story_prompt))
-                        story_current_paragraph[user_id] = next_paragraph
+                    )
+                    reply_messages.append(TextSendMessage(text=next_story_prompt))
+                    story_current_paragraph[user_id] = next_paragraph
+ 
 
                 line_bot_api.reply_message(reply_token, reply_messages)
                 save_to_firebase(user_id, "user", user_text)
