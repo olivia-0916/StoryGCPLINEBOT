@@ -249,6 +249,10 @@ def handle_message(event):
             story_content = ""
             if user_id in story_paragraphs and 0 <= current_paragraph < len(story_paragraphs[user_id]):
                 story_content = story_paragraphs[user_id][current_paragraph]
+            # === Debug log ===
+            print("DEBUG story_paragraphs:", story_paragraphs.get(user_id))
+            print("DEBUG current_paragraph:", current_paragraph)
+            print("DEBUG story_content:", story_content)
 
             # === 新增：插圖細節修改 ===
             last_prompt_dict = user_sessions.setdefault(user_id, {}).setdefault('last_image_prompt', {})
