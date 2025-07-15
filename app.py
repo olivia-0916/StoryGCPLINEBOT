@@ -219,8 +219,9 @@ def handle_message(event):
             user_sessions.setdefault(user_id, {})['last_image_prompt'] = {}
 
         # === 插圖生成分支 ===
-        match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
-        if match:
+        if "封面" not in user_text:
+            match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
+            if match:
             prompt = match.group(1).strip()
             # 從使用者輸入中提取段落編號
             paragraph_match = re.search(r'第[一二三四五12345]段|第一段|第二段|第三段|第四段|第五段', user_text)
