@@ -335,8 +335,8 @@ def handle_message(event):
                             "你可以跟我描述這張圖上有什麼元素，或直接說『幫我畫第"
                             f"{next_paragraph + 1}段故事的插圖』，我會根據故事內容自動生成。"
                         )
-                    reply_messages.append(TextSendMessage(text=next_story_prompt))
-                    story_current_paragraph[user_id] = next_paragraph
+                        reply_messages.append(TextSendMessage(text=next_story_prompt))
+                        story_current_paragraph[user_id] = next_paragraph
  
 
                 line_bot_api.reply_message(reply_token, reply_messages)
