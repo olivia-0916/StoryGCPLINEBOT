@@ -123,6 +123,38 @@ def extract_story_paragraphs(summary):
     clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in paragraphs]
     return clean_paragraphs[:5]  # 確保只返回5段
 
+def optimize_image_prompt(story_content, user_prompt=""):
+    """
+    用 GPT-4 將故事段落和用戶細節描述，優化成適合 DALL·E 3 的英文 prompt，並根據用戶描述自訂風格
+    """
+    try:
+        style_keywords = [
+            "水彩", "油畫", "漫畫", "素描", "像素", "插畫", "photorealistic", "pixel", "comic", "sketch", "watercolor", "oil painting"
+        ]
+        user_style = [kw for kw in style_keywords if kw in user_prompt]
+        if user_style:
+            style_instruction = "風格請依照用戶描述。"
+        else:
+            style_instruction = "風格要溫馨、柔和、色彩豐富。"
+        base_instruction = (
+            "請將以下故事段落和細節描述，改寫成適合 DALL·E 3 生成繪本風格圖片的英文 prompt，"
+            f"{style_instruction} 明確要求 no text, no words, no letters, no captions, no subtitles, no watermark。"
+        )
+        content = f"故事段落：{story_content}\n細節描述：{user_prompt}"
+        messages = [
+            {"role": "system", "content": base_instruction},
+            {"role": "user", "content": content}
+        ]
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.7,
+        )
+        return response.choices[0].message["content"].strip()
+    except Exception as e:
+        print("❌ 優化插圖 prompt 失敗：", e)
+        return None
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -210,7 +242,13 @@ def handle_message(event):
             # 記錄本次 prompt
             last_prompt_dict[current_paragraph] = prompt
 
-            image_url = generate_dalle_image(prompt, user_id)
+            # === 新增：自動優化 prompt ===
+            optimized_prompt = optimize_image_prompt(story_content, prompt)
+            if not optimized_prompt:
+                # fallback
+                optimized_prompt = f"A colorful, soft, watercolor-style picture book illustration for children, no text, no words, no letters. Story: {story_content} {prompt}"
+
+            image_url = generate_dalle_image(optimized_prompt, user_id)
 
             if image_url:
                 reply_messages = [
