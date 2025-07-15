@@ -246,7 +246,8 @@ def handle_message(event):
         # === 插圖生成分支 ===
         if "封面" not in user_text:
             match = re.search(r"(?:請畫|幫我畫|生成.*圖片|畫.*圖|我想要一張.*圖)(.*)", user_text)
-            current_paragraph = story_current_paragraph.get(user_id, 0)  # 預設值，避免 UnboundLocalError
+            current_paragraph = story_current_paragraph.get(user_id, 0)  # 預設值
+            prompt = ""  # 預設值，避免 UnboundLocalError
             if match:
                 prompt = match.group(1).strip()
                 # 從使用者輸入中提取段落編號
