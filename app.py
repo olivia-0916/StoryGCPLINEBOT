@@ -163,6 +163,32 @@ def handle_message(event):
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
+        # === 封面生成分支 ===
+        if user_sessions.get(user_id, {}).get("awaiting_cover", False):
+            cover_prompt = user_text.strip()
+            story_title = story_titles.get(user_id, "我們的故事")
+            story_summary = story_summaries.get(user_id, "")
+            optimized_prompt = optimize_image_prompt(story_summary, f"封面：{cover_prompt}，故事名稱：{story_title}")
+            if not optimized_prompt:
+                optimized_prompt = f"A beautiful, colorful storybook cover illustration. Title: {story_title}. {cover_prompt}. No text, no words, no letters."
+            image_url = generate_dalle_image(optimized_prompt, user_id)
+            if image_url:
+                reply_messages = [
+                    TextSendMessage(text="這是你故事的封面："),
+                    ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
+                    TextSendMessage(text="你滿意這個封面嗎？需要調整可以再描述一次喔！")
+                ]
+                line_bot_api.reply_message(reply_token, reply_messages)
+                save_to_firebase(user_id, "user", user_text)
+                for msg in reply_messages:
+                    if isinstance(msg, TextSendMessage):
+                        save_to_firebase(user_id, "assistant", msg.text)
+                    elif isinstance(msg, ImageSendMessage):
+                        save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這個封面，試試其他描述看看 🖍️"))
+            # 保持 awaiting_cover = True，直到用戶滿意
+            return
         # 進入故事模式
         if re.search(r"(開始說故事|說故事|講個故事|說一個故事|講一個故事|一起來講故事吧|我們來講故事吧)", user_text):
             reset_story_memory(user_id)
@@ -259,7 +285,9 @@ def handle_message(event):
                 # 修正：只有畫第五段才結束，其他都推送下一段
                 if current_paragraph == 4:
                     reply_messages.append(TextSendMessage(text="太好了！所有段落的插圖都完成了！"))
+                    reply_messages.append(TextSendMessage(text="現在，請幫這個故事設計一個封面吧。你希望封面有什麼主題或元素呢？"))
                     illustration_mode[user_id] = False
+                    user_sessions[user_id]["awaiting_cover"] = True  # 新增封面狀態
                 else:
                     next_paragraph = current_paragraph + 1
                     if user_id in story_paragraphs and next_paragraph < len(story_paragraphs[user_id]):
