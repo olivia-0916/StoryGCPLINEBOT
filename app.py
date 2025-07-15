@@ -117,10 +117,12 @@ def generate_story_summary(messages):
         return None
 
 def extract_story_paragraphs(summary):
-    """從故事摘要中提取5段故事內容"""
+    """從故事摘要中提取5段故事內容，過濾開場白"""
     paragraphs = [p.strip() for p in summary.split('\n') if p.strip()]
+    # 過濾掉明顯不是故事內容的開場白
+    filtered = [p for p in paragraphs if not re.match(r'^(好的|以下|讓我來|整理一下|故事如下|Summary|Here is|Here are)', p)]
     # 移除段落編號
-    clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in paragraphs]
+    clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in filtered]
     return clean_paragraphs[:5]  # 確保只返回5段
 
 def optimize_image_prompt(story_content, user_prompt=""):
