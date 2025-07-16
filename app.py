@@ -243,6 +243,40 @@ def handle_message(event):
         if 'last_image_prompt' not in user_sessions.get(user_id, {}):
             user_sessions.setdefault(user_id, {})['last_image_prompt'] = {}
 
+        # === 通用繪圖指令分支（需放在段落插圖分支之前） ===
+        if re.search(r"(幫我畫|請畫)", user_text) and not re.search(r"第[一二三四五12345]段", user_text):
+            # 取得故事摘要或段落
+            story_summary = story_summaries.get(user_id, "")
+            story_content = ""
+            if user_id in story_paragraphs and story_paragraphs[user_id]:
+                story_content = "；".join(story_paragraphs[user_id])
+            # 合併故事內容與用戶描述
+            prompt = user_text
+            if story_content:
+                prompt = f"{story_content}；{user_text}"
+            elif story_summary:
+                prompt = f"{story_summary}；{user_text}"
+            # 優化 prompt
+            optimized_prompt = optimize_image_prompt(story_content or story_summary, user_text)
+            if not optimized_prompt:
+                optimized_prompt = f"A beautiful, colorful storybook illustration. {user_text}. No text, no words, no letters."
+            image_url = generate_dalle_image(optimized_prompt, user_id)
+            if image_url:
+                reply_messages = [
+                    TextSendMessage(text="這是你要的插圖："),
+                    ImageSendMessage(original_content_url=image_url, preview_image_url=image_url),
+                    TextSendMessage(text="你滿意這張圖嗎？需要調整可以再描述一次喔！")
+                ]
+                line_bot_api.reply_message(reply_token, reply_messages)
+                save_to_firebase(user_id, "user", user_text)
+                for msg in reply_messages:
+                    if isinstance(msg, TextSendMessage):
+                        save_to_firebase(user_id, "assistant", msg.text)
+                    elif isinstance(msg, ImageSendMessage):
+                        save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
+            return
         # === 插圖生成分支 ===
         # 僅當訊息明確要求畫第X段故事的圖時才進入插圖分支
         if re.search(r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)", user_text):
