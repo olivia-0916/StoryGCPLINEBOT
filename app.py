@@ -136,22 +136,39 @@ def optimize_image_prompt(story_content, user_prompt=""):
     用 GPT-4 將故事段落和用戶細節描述，優化成適合 DALL·E 3 的英文 prompt，並根據用戶描述自訂風格
     """
     try:
-        style_keywords = [
-            "水彩", "油畫", "漫畫", "素描", "像素", "插畫", "photorealistic", "pixel", "comic", "sketch", "watercolor", "oil painting"
-        ]
-        user_style = [kw for kw in style_keywords if kw in user_prompt]
-        if user_style:
-            style_instruction = "風格請依照用戶描述。"
-        else:
-            style_instruction = "風格要溫馨、柔和、色彩豐富。"
+        # 風格關鍵字對應的英文描述
+        style_map = {
+            "水彩": "watercolor style, soft colors, gentle brush strokes",
+            "油畫": "oil painting, thick brush strokes, canvas texture, oil paint style",
+            "色鉛筆": "colored pencil drawing, hand-drawn, sketch style, colored pencils",
+            "水墨": "Chinese ink wash painting, black and white, monochrome, ink brush, traditional Asian painting, ink style, no color",
+            "寫實": "photorealistic, highly detailed, realistic style, lifelike, ultra-realistic",
+            "現代": "modern art style, abstract, contemporary, modern design"
+        }
+        # 收集用戶描述中出現的風格關鍵字
+        user_styles = []
+        for zh, en in style_map.items():
+            if zh in user_prompt:
+                user_styles.append(en)
+        # 組合風格描述（多次強調）
+        style_english = ", ".join(user_styles)
+        if style_english:
+            style_english = f"{style_english}, {style_english}"
+        # 其餘細節描述
+        detail_prompt = user_prompt
+        # 組合英文 prompt，風格描述放最前面
         base_instruction = (
-            "請將以下故事段落和細節描述，改寫成適合 DALL·E 3 生成繪本風格圖片的英文 prompt，"
-            f"{style_instruction} 明確要求 no text, no words, no letters, no captions, no subtitles, no watermark。"
+            "Please rewrite the following story paragraph and user details into an English prompt suitable for DALL·E 3 picture book illustration. "
+            "No text, no words, no letters, no captions, no subtitles, no watermark. "
         )
-        content = f"故事段落：{story_content}\n細節描述：{user_prompt}"
+        content = f"Story paragraph: {story_content}\nDetails: {detail_prompt}"
+        if style_english:
+            full_prompt = f"{style_english}. {content}"
+        else:
+            full_prompt = content
         messages = [
             {"role": "system", "content": base_instruction},
-            {"role": "user", "content": content}
+            {"role": "user", "content": full_prompt}
         ]
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
