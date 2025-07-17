@@ -291,9 +291,32 @@ def handle_message(event):
             if summary:
                 story_paragraphs[user_id] = extract_story_paragraphs(summary)
                 story_summaries[user_id] = summary
+                # === 新增：將故事摘要、段落存到 Firebase ===
+                try:
+                    user_doc_ref = db.collection("users").document(user_id)
+                    user_doc_ref.set({
+                        "story_summary": summary,
+                        "story_paragraphs": story_paragraphs[user_id]
+                    }, merge=True)
+                except Exception as e:
+                    print(f"⚠️ 儲存故事摘要/段落到 Firebase 失敗：{e}")
             else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時無法整理故事段落，請再試一次！"))
-                return
+                # === 新增：若記憶體沒有，從 Firebase 讀取恢復 ===
+                try:
+                    user_doc_ref = db.collection("users").document(user_id)
+                    user_data = user_doc_ref.get()
+                    if user_data.exists:
+                        data = user_data.to_dict()
+                        story_summaries[user_id] = data.get("story_summary", "")
+                        story_paragraphs[user_id] = data.get("story_paragraphs", [])
+                        print("✅ 從 Firebase 恢復故事摘要與段落")
+                    else:
+                        line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時無法整理故事段落，請再試一次！"))
+                        return
+                except Exception as e:
+                    print(f"❌ 從 Firebase 讀取故事摘要/段落失敗：{e}")
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時無法整理故事段落，請再試一次！"))
+                    return
             # 解析段落編號
             paragraph_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
             paragraph_num = None
