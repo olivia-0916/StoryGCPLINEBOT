@@ -342,6 +342,10 @@ def handle_message(event):
             print(f"===== 這次要畫的段落（第 {current_paragraph+1} 段） =====")
             print(story_content)
 
+            # === 新增：抽取用戶新描述 ===
+            # 只保留『第X段故事的圖』以外的描述
+            user_extra_desc = re.sub(r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)[，,。.!！]*", "", user_text).strip()
+
             last_prompt_dict = user_sessions.setdefault(user_id, {}).setdefault('last_image_prompt', {})
             last_prompt = last_prompt_dict.get(current_paragraph, "")
             if not prompt and story_content:
@@ -354,9 +358,14 @@ def handle_message(event):
             elif not prompt:
                 prompt = story_content
             last_prompt_dict[current_paragraph] = prompt
-            optimized_prompt = optimize_image_prompt(story_content, prompt)
+
+            # === 修改：將故事內容和用戶新描述一起送進 optimize_image_prompt ===
+            optimized_prompt = optimize_image_prompt(story_content, user_extra_desc)
+            # print 出最後送進 DALL·E 3 的 prompt
+            print("===== 最後送進 DALL·E 3 的 prompt =====")
+            print(optimized_prompt)
             if not optimized_prompt:
-                optimized_prompt = f"A colorful, soft, watercolor-style picture book illustration for children, no text, no words, no letters. Story: {story_content} {prompt}"
+                optimized_prompt = f"A colorful, soft, watercolor-style picture book illustration for children, no text, no words, no letters. Story: {story_content} {user_extra_desc}"
             image_url = generate_dalle_image(optimized_prompt, user_id)
             if image_url:
                 reply_messages = [
