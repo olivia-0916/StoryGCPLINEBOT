@@ -285,6 +285,15 @@ def handle_message(event):
             match = re.search(r"(幫我畫第([一二三四五12345])段故事的圖|請畫第([一二三四五12345])段故事的插圖|畫第([一二三四五12345])段故事的圖)", user_text)
             current_paragraph = story_current_paragraph.get(user_id, 0)
             prompt = ""
+            # 1. 先用最新對話歷史重新整理故事大綱與段落
+            messages = user_sessions.get(user_id, {}).get("messages", [])
+            summary = generate_story_summary(messages)
+            if summary:
+                story_paragraphs[user_id] = extract_story_paragraphs(summary)
+                story_summaries[user_id] = summary
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時無法整理故事段落，請再試一次！"))
+                return
             # 解析段落編號
             paragraph_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
             paragraph_num = None
@@ -293,26 +302,23 @@ def handle_message(event):
                     paragraph_num = match.group(int(key))
                     break
             if not paragraph_num:
-                # 用正則再抓一次
                 paragraph_match = re.search(r'[一二三四五12345]', user_text)
                 if paragraph_match:
                     paragraph_num = paragraph_match.group(0)
             if paragraph_num and paragraph_num in paragraph_map:
                 current_paragraph = paragraph_map[paragraph_num] - 1
-            # === 新增：如果還沒摘要，先自動摘要並拆段 ===
-            if (user_id not in story_paragraphs) or (not story_paragraphs[user_id]) or (len(story_paragraphs[user_id]) < 5):
-                messages = user_sessions.get(user_id, {}).get("messages", [])
-                summary = generate_story_summary(messages)
-                if summary:
-                    story_paragraphs[user_id] = extract_story_paragraphs(summary)
-                    story_summaries[user_id] = summary
-                else:
-                    line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時無法整理故事段落，請再試一次！"))
-                    return
             # 取得該段故事內容
             story_content = ""
             if user_id in story_paragraphs and 0 <= current_paragraph < len(story_paragraphs[user_id]):
                 story_content = story_paragraphs[user_id][current_paragraph]
+
+            # print 出目前整理好的故事大綱與本次要畫的段落內容
+            print("\n===== 機器人當前使用的故事大綱（五段） =====")
+            for idx, para in enumerate(story_paragraphs[user_id]):
+                print(f"{idx+1}. {para}")
+            print(f"===== 這次要畫的段落（第 {current_paragraph+1} 段） =====")
+            print(story_content)
+
             last_prompt_dict = user_sessions.setdefault(user_id, {}).setdefault('last_image_prompt', {})
             last_prompt = last_prompt_dict.get(current_paragraph, "")
             if not prompt and story_content:
