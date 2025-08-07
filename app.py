@@ -580,31 +580,67 @@ def extract_title_from_reply(reply_text):
 def generate_storydiffusion_image(prompt, user_id):
     try:
         print(f"🖍️ 使用 StoryDiffusion 產圖中：{prompt}")
+        print(f"🔍 HF_TOKEN 是否存在：{'HF_TOKEN' in os.environ}")
+        if 'HF_TOKEN' in os.environ:
+            print(f"🔑 HF_TOKEN 前10個字元：{os.environ['HF_TOKEN'][:10]}...")
+        else:
+            print("❌ HF_TOKEN 環境變數未設定")
+            return None
 
         # 呼叫 Hugging Face Space API
         api_url = "https://huggingface.co/spaces/SimianLuo/StoryDiffusion/+/api/predict"
         headers = {"Authorization": f"Bearer {os.environ['HF_TOKEN']}"}
         payload = {"inputs": prompt}
+        
+        print(f"🔗 API URL：{api_url}")
+        print(f"📤 發送 payload：{payload}")
+        print(f"📋 Headers：{headers}")
+        
         response = requests.post(api_url, headers=headers, json=payload)
+        print(f"📥 Response status code：{response.status_code}")
+        print(f"📥 Response headers：{dict(response.headers)}")
+        
+        if response.status_code != 200:
+            print(f"❌ API 呼叫失敗，status code：{response.status_code}")
+            print(f"❌ Response content：{response.text}")
+            return None
+            
         response.raise_for_status()
 
         # 擷取圖片 URL
-        image_url = response.json()["data"][0]["url"]
+        response_json = response.json()
+        print(f"📄 Response JSON：{response_json}")
+        
+        if "data" not in response_json or not response_json["data"]:
+            print("❌ Response 中沒有 data 欄位")
+            return None
+            
+        image_url = response_json["data"][0]["url"]
         print(f"✅ StoryDiffusion 回傳圖片 URL：{image_url}")
 
         # 下載圖片資料
-        img_data = requests.get(image_url).content
+        print(f"📥 開始下載圖片...")
+        img_response = requests.get(image_url)
+        if img_response.status_code != 200:
+            print(f"❌ 下載圖片失敗，status code：{img_response.status_code}")
+            return None
+            
+        img_data = img_response.content
+        print(f"✅ 圖片下載成功，大小：{len(img_data)} bytes")
 
         # 建立唯一檔名
         filename = f"{user_id}_{uuid.uuid4().hex}.png"
+        print(f"📝 檔案名稱：{filename}")
 
         # 上載到 GCS
+        print(f"☁️ 開始上載到 GCS...")
         blob = bucket.blob(filename)
         blob.upload_from_string(img_data, content_type="image/png")
         gcs_url = f"https://storage.googleapis.com/{bucket_name}/{filename}"
         print(f"✅ 圖片已上載至 GCS：{gcs_url}")
 
         # 儲存 Firestore 紀錄
+        print(f"💾 儲存到 Firestore...")
         db.collection("users").document(user_id).collection("images").add({
             "url": gcs_url,
             "prompt": prompt,
@@ -616,6 +652,7 @@ def generate_storydiffusion_image(prompt, user_id):
 
     except Exception as e:
         print("❌ StoryDiffusion 圖片產生失敗：", e)
+        print(f"❌ 錯誤類型：{type(e).__name__}")
         traceback.print_exc()
         return None
 
