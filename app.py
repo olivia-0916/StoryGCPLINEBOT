@@ -196,7 +196,7 @@ def handle_message(event):
             optimized_prompt = optimize_image_prompt(story_summary, f"封面：{cover_prompt}，故事名稱：{story_title}")
             if not optimized_prompt:
                 optimized_prompt = f"A beautiful, colorful storybook cover illustration. Title: {story_title}. {cover_prompt}. No text, no words, no letters."
-            image_url = generate_dalle_image(optimized_prompt, user_id)
+            image_url = generate_storydiffusion_image(optimized_prompt, user_id)
             if image_url:
                 reply_messages = [
                     TextSendMessage(text="這是你故事的封面："),
@@ -221,7 +221,7 @@ def handle_message(event):
             optimized_prompt = optimize_image_prompt(story_summary, f"封面：{cover_prompt}，故事名稱：{story_title}")
             if not optimized_prompt:
                 optimized_prompt = f"A beautiful, colorful storybook cover illustration. Title: {story_title}. {cover_prompt}. No text, no words, no letters."
-            image_url = generate_dalle_image(optimized_prompt, user_id)
+            image_url = generate_storydiffusion_image(optimized_prompt, user_id)
             if image_url:
                 reply_messages = [
                     TextSendMessage(text="這是你故事的封面："),
@@ -279,7 +279,7 @@ def handle_message(event):
             optimized_prompt = optimize_image_prompt(story_content or story_summary, user_text)
             if not optimized_prompt:
                 optimized_prompt = f"A beautiful, colorful storybook illustration. {user_text}. No text, no words, no letters."
-            image_url = generate_dalle_image(optimized_prompt, user_id)
+            image_url = generate_storydiffusion_image(optimized_prompt, user_id)
             if image_url:
                 reply_messages = [
                     TextSendMessage(text="這是你要的插圖："),
@@ -383,7 +383,7 @@ def handle_message(event):
             print(optimized_prompt)
             if not optimized_prompt:
                 optimized_prompt = f"A colorful, soft, watercolor-style picture book illustration for children, no text, no words, no letters. Story: {story_content} {user_extra_desc}"
-            image_url = generate_dalle_image(optimized_prompt, user_id)
+            image_url = generate_storydiffusion_image(optimized_prompt, user_id)
             if image_url:
                 reply_messages = [
                     TextSendMessage(text=f"這是第 {current_paragraph + 1} 段故事的插圖："),
@@ -576,6 +576,48 @@ def extract_summary_from_reply(reply_text):
 def extract_title_from_reply(reply_text):
     match = re.search(r"(?:故事名稱|標題)[:：]?([\w\u4e00-\u9fff]{3,8})", reply_text)
     return match.group(1).strip() if match else "我們的故事"
+
+def generate_storydiffusion_image(prompt, user_id):
+    try:
+        print(f"🖍️ 使用 StoryDiffusion 產圖中：{prompt}")
+
+        # 呼叫 Hugging Face Space API
+        api_url = "https://huggingface.co/spaces/SimianLuo/StoryDiffusion/+/api/predict"
+        headers = {"Authorization": f"Bearer {os.environ['HF_TOKEN']}"}
+        payload = {"inputs": prompt}
+        response = requests.post(api_url, headers=headers, json=payload)
+        response.raise_for_status()
+
+        # 擷取圖片 URL
+        image_url = response.json()["data"][0]["url"]
+        print(f"✅ StoryDiffusion 回傳圖片 URL：{image_url}")
+
+        # 下載圖片資料
+        img_data = requests.get(image_url).content
+
+        # 建立唯一檔名
+        filename = f"{user_id}_{uuid.uuid4().hex}.png"
+
+        # 上載到 GCS
+        blob = bucket.blob(filename)
+        blob.upload_from_string(img_data, content_type="image/png")
+        gcs_url = f"https://storage.googleapis.com/{bucket_name}/{filename}"
+        print(f"✅ 圖片已上載至 GCS：{gcs_url}")
+
+        # 儲存 Firestore 紀錄
+        db.collection("users").document(user_id).collection("images").add({
+            "url": gcs_url,
+            "prompt": prompt,
+            "timestamp": firestore.SERVER_TIMESTAMP
+        })
+        print("✅ 圖片資訊已儲存到 Firestore")
+
+        return gcs_url
+
+    except Exception as e:
+        print("❌ StoryDiffusion 圖片產生失敗：", e)
+        traceback.print_exc()
+        return None
 
 def generate_dalle_image(prompt, user_id):
     try:
