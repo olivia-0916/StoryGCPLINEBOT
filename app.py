@@ -277,7 +277,7 @@ def generate_leonardo_image(user_id, prompt, reference_image_url=None):
 
         payload = {
             "prompt": prompt,
-            "modelId": "6bef9f1b-29cb-40c8-b9d5-341ac2e02ad6",
+            "modelId": "b22262c2-9e4a-4467-9c2b-2e987c675f92",
             "height": 768,
             "width": 768,
             "num_images": 1,
