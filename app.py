@@ -8,7 +8,7 @@ import uuid
 import requests
 import time
 from datetime import datetime
-from flask import Flask, request, abort, render_template, jsonify
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
@@ -57,6 +57,16 @@ story_paragraphs = {}
 illustration_mode = {}
 practice_mode = {}
 
+# 一致性控制
+user_fixed_seed = {}        # 每位使用者固定 seed
+user_character_sheet = {}   # 角色設定卡（前綴）
+
+# ========= 常數 =========
+LEO_BASE = "https://cloud.leonardo.ai/api/rest/v1"
+LUCID_ORIGIN_ID = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"
+IMG_W = 512
+IMG_H = 512
+
 # ========= 系統提示 =========
 base_system_prompt = """
 你是「小繪」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
@@ -96,7 +106,10 @@ def reset_story_memory(user_id):
     story_paragraphs[user_id] = []
     illustration_mode[user_id] = False
     practice_mode[user_id] = True
-    print(f"✅ 已重置使用者 {user_id} 的故事記憶")
+    # 重置一致性
+    user_fixed_seed[user_id] = random.randint(100000, 999999)
+    user_character_sheet[user_id] = ""
+    print(f"✅ 已重置使用者 {user_id} 的故事記憶與一致性設定")
 
 def generate_story_summary(messages):
     try:
@@ -105,12 +118,6 @@ def generate_story_summary(messages):
 每段約40字，請盡量保留用戶描述的細節，不要省略重要情節或角色行動。
 請確保五段故事涵蓋用戶所有描述過的重要事件與細節。
 每段前面加數字（1. 2. 3. 4. 5.）。
-格式範例：
-1. 小明在森林裡發現一隻受傷的小鳥。
-2. 他決定帶小鳥回家照顧。
-3. 經過細心照料，小鳥逐漸康復。
-4. 小鳥學會了飛行，但捨不得離開。
-5. 最後小鳥選擇留下來陪伴小明。
 """
         messages_for_summary = [
             {"role": "system", "content": summary_prompt},
@@ -150,14 +157,12 @@ def optimize_image_prompt(story_content, user_prompt=""):
         }
         user_styles = [en for zh, en in style_map.items() if zh in user_prompt]
         style_english = ", ".join(user_styles)
-
         base_instruction = (
             "Please rewrite the following story paragraph and user details into an English prompt suitable for a children picture book illustration. "
             "No text, no words, no letters, no captions, no subtitles, no watermark."
         )
         content = f"Story paragraph: {story_content}\nDetails: {user_prompt}"
         full_prompt = f"{style_english}. {content}" if style_english else content
-
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": base_instruction},
@@ -238,17 +243,17 @@ def save_to_firebase(user_id, role, text):
         print(f"⚠️ 儲存 Firebase 失敗（{role}）：", e)
 
 # ========= Leonardo.Ai =========
-LEO_BASE = "https://cloud.leonardo.ai/api/rest/v1"
-# 你截圖裡的 Lucid Origin modelId
-LUCID_ORIGIN_ID = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"
-
-def generate_leonardo_image(user_id, prompt, model_id=LUCID_ORIGIN_ID):
+def generate_leonardo_image(user_id, prompt, model_id=LUCID_ORIGIN_ID,
+                            reference_image_url=None, init_strength=None,
+                            use_enhance=True, seed=None, width=IMG_W, height=IMG_H):
     """
-    Leonardo 文字轉圖（同步：送出→輪詢→回 URL）。
-    備註：image-to-image 需先上傳得到 imageId，這裡先用純文字生圖以確保穩定。
+    - reference_image_url: 上一張當底（img2img）
+    - init_strength: 0~1，越小越接近原圖；建議 0.20~0.35
+    - use_enhance: 第一張 True，後續 False 降低漂移
+    - seed: 固定種子
     """
     if not LEONARDO_API_KEY:
-        print("❌ LEONARDO_API_KEY 環境變數未設定")
+        print("❌ LEONARDO_API_KEY 未設定")
         return None
 
     headers = {
@@ -262,17 +267,27 @@ def generate_leonardo_image(user_id, prompt, model_id=LUCID_ORIGIN_ID):
         "modelId": model_id,
         "prompt": prompt,
         "num_images": 1,
-        "width": 1024,
-        "height": 1024,
+        "width": width,
+        "height": height,
         "contrast": 3.0,
         "ultra": False,
-        "enhancePrompt": True,
-        "negative_prompt": "text, letters, words, subtitles, watermark, signature"
+        "enhancePrompt": bool(use_enhance),
+        "negative_prompt": "text, letters, words, captions, subtitles, watermark, signature, different character, change hairstyle, change outfit, age change, gender change"
     }
+
+    if seed is not None:
+        payload["seed"] = int(seed)
+
+    if reference_image_url and init_strength is not None:
+        payload["init_generation_image_url"] = reference_image_url
+        payload["init_strength"] = float(init_strength)
+        # 後續圖通常關閉增強避免漂移
+        payload["enhancePrompt"] = False
 
     try:
         print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
-        resp = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload, timeout=45, allow_redirects=False)
+        resp = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
+                             timeout=45, allow_redirects=False)
         if resp.status_code >= 400:
             print("❌ Leonardo POST 失敗:", resp.status_code, resp.text[:600])
             resp.raise_for_status()
@@ -286,10 +301,6 @@ def generate_leonardo_image(user_id, prompt, model_id=LUCID_ORIGIN_ID):
         return None
 
 def wait_for_leonardo_image(generation_id, timeout=120):
-    """
-    依官方 sample：GET /generations/<id>
-    回傳格式使用 generations_by_pk。
-    """
     start = time.time()
     headers = {
         "Authorization": f"Bearer {LEONARDO_API_KEY}",
@@ -306,15 +317,12 @@ def wait_for_leonardo_image(generation_id, timeout=120):
                 r.raise_for_status()
 
             data = r.json()
-            # 官方文件常見回應
             g = data.get("generations_by_pk") or {}
             status = g.get("status")
             if status == "COMPLETE":
                 imgs = g.get("images") or g.get("generated_images") or []
                 if imgs:
-                    first = imgs[0]
-                    # 可能是 {"url": "..."} 或 {"image_url": "..."}
-                    return first.get("url") or first.get("image_url")
+                    return imgs[0].get("url") or imgs[0].get("image_url")
                 print("⚠️ 完成但沒有圖片 URL")
                 return None
             elif status == "FAILED":
@@ -367,7 +375,7 @@ def handle_message(event):
             ))
             return
 
-        # 在故事模式下，嘗試產生第一張主角圖
+        # 在故事模式下，自動產生第一張主角圖（建立角色設定卡、固定 seed）
         if user_sessions.get(user_id, {}).get("story_mode", False) and 'reference_image_url' not in user_sessions[user_id]:
             if user_message_counts.get(user_id, 0) >= 3:
                 messages = user_sessions.get(user_id, {}).get("messages", [])
@@ -377,8 +385,27 @@ def handle_message(event):
                     story_summaries[user_id] = summary
                     first_paragraph_prompt = story_paragraphs[user_id][0]
                     optimized_prompt = optimize_image_prompt(first_paragraph_prompt, "watercolor, children picture book style")
+
                     if optimized_prompt:
-                        url = generate_leonardo_image(user_id, optimized_prompt)
+                        # 角色設定卡（前綴）
+                        user_character_sheet[user_id] = (
+                            "Consistent main character across all images. "
+                            "Same face, hairstyle, clothing, colors, proportions. "
+                            "Watercolor children picture-book style. "
+                            + optimized_prompt
+                        )
+                        if user_id not in user_fixed_seed:
+                            user_fixed_seed[user_id] = random.randint(100000, 999999)
+
+                        url = generate_leonardo_image(
+                            user_id=user_id,
+                            prompt=user_character_sheet[user_id],
+                            reference_image_url=None,
+                            init_strength=None,
+                            use_enhance=True,
+                            seed=user_fixed_seed[user_id],
+                            width=IMG_W, height=IMG_H
+                        )
                         if url:
                             gcs_url = upload_to_gcs_from_url(url, user_id, optimized_prompt)
                             if gcs_url:
@@ -396,121 +423,3 @@ def handle_message(event):
                                     elif isinstance(msg, ImageSendMessage):
                                         save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
                                 return
-
-        if re.search(r"封面", user_text):
-            cover_prompt = user_text.replace("幫我畫封面圖", "").replace("請畫封面", "").replace("畫封面", "").strip()
-            story_title = story_titles.get(user_id, "我們的故事")
-            story_summary = story_summaries.get(user_id, "")
-            optimized_prompt = optimize_image_prompt(story_summary, f"cover: {cover_prompt}, title: {story_title}, watercolor children picture book style")
-            if not optimized_prompt:
-                optimized_prompt = f"storybook cover illustration, watercolor, vibrant, no text or letters. theme: {story_title}. {cover_prompt}"
-            url = generate_leonardo_image(user_id, optimized_prompt)
-            if url:
-                gcs_url = upload_to_gcs_from_url(url, user_id, optimized_prompt)
-                if gcs_url:
-                    reply_messages = [
-                        TextSendMessage(text="這是你的封面："),
-                        ImageSendMessage(original_content_url=gcs_url, preview_image_url=gcs_url),
-                        TextSendMessage(text="需要調整可以再描述一次喔！")
-                    ]
-                    line_bot_api.reply_message(reply_token, reply_messages)
-                    save_to_firebase(user_id, "user", user_text)
-                    for msg in reply_messages:
-                        if isinstance(msg, TextSendMessage):
-                            save_to_firebase(user_id, "assistant", msg.text)
-                        elif isinstance(msg, ImageSendMessage):
-                            save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
-            else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時畫不出這個封面，換個描述再試試 🖍️"))
-            return
-        
-        if re.search(r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)", user_text):
-            match = re.search(r"[一二三四五12345]", user_text)
-            paragraph_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
-            paragraph_num = paragraph_map.get(match.group(0) if match else None, 1) - 1
-
-            messages = user_sessions.get(user_id, {}).get("messages", [])
-            summary = generate_story_summary(messages)
-            if summary:
-                story_paragraphs[user_id] = extract_story_paragraphs(summary)
-                story_summaries[user_id] = summary
-            
-            if not story_paragraphs.get(user_id) or not (0 <= paragraph_num < len(story_paragraphs[user_id])):
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪還沒有整理好這段故事，請再多說一點細節吧！"))
-                return
-            
-            story_content = story_paragraphs[user_id][paragraph_num]
-            user_extra_desc = re.sub(r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)[，,。.!！]*", "", user_text).strip()
-            optimized_prompt = optimize_image_prompt(story_content, user_extra_desc or "watercolor children picture book style")
-            if not optimized_prompt:
-                optimized_prompt = f"A soft watercolor picture book illustration for children, no text or letters. Story: {story_content} {user_extra_desc}"
-
-            url = generate_leonardo_image(user_id, optimized_prompt)
-            if url:
-                gcs_url = upload_to_gcs_from_url(url, user_id, optimized_prompt)
-                if gcs_url:
-                    reply_messages = [
-                        TextSendMessage(text=f"這是第 {paragraph_num + 1} 段故事的插圖："),
-                        ImageSendMessage(original_content_url=gcs_url, preview_image_url=gcs_url)
-                    ]
-                    line_bot_api.reply_message(reply_token, reply_messages)
-                    save_to_firebase(user_id, "user", user_text)
-                    for msg in reply_messages:
-                        if isinstance(msg, TextSendMessage):
-                            save_to_firebase(user_id, "assistant", msg.text)
-                        elif isinstance(msg, ImageSendMessage):
-                            save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
-            else:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪畫不出這張圖，試試其他描述看看 🖍️"))
-            return
-        
-        if re.search(r"(取故事標題|幫我取故事標題|取標題|幫我想標題)", user_text):
-            story_summary = story_summaries.get(user_id, "")
-            if not story_summary:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="目前還沒有故事大綱，請先完成故事內容喔！"))
-                return
-            
-            title_prompt = f"請根據以下故事大綱，產生三個適合的故事書標題，每個不超過8字，並用1. 2. 3. 編號：\n{story_summary}"
-            response = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "你是一位擅長為故事取名的AI，請根據故事大綱產生三個簡潔有創意的故事書標題，每個不超過8字。"},
-                    {"role": "user", "content": title_prompt}
-                ],
-                temperature=0.7,
-            )
-            titles = response.choices[0].message["content"].strip()
-            line_bot_api.reply_message(reply_token, TextSendMessage(
-                text=f"這裡有三個故事標題選項：\n{titles}\n\n請回覆你最喜歡的編號或直接輸入標題！"
-            ))
-            save_to_firebase(user_id, "user", user_text)
-            save_to_firebase(user_id, "assistant", f"故事標題選項：\n{titles}")
-            return
-        
-        encouragement_suffix = ""
-        if user_sessions.get(user_id, {}).get("story_mode", False):
-            encouragement_suffix = random.choice([
-                "你真的很有創意！我喜歡這個設計！🌟",
-                "非常好，我覺得這個想法很不錯！👏",
-                "繼續加油，你做得很棒！💪",
-                "你真是故事大師！😊"
-            ])
-        
-        assistant_reply = get_openai_response(user_id, user_text, encouragement_suffix)
-
-        if not assistant_reply:
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時卡住了，請稍後再試喔"))
-            return
-
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
-        save_to_firebase(user_id, "user", user_text)
-        save_to_firebase(user_id, "assistant", assistant_reply)
-
-    except Exception as e:
-        print("❌ 發生錯誤：", e)
-        traceback.print_exc()
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪出了一點小狀況，請稍後再試 🙇"))
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
