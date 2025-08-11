@@ -28,8 +28,6 @@ LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS")
 LEONARDO_API_KEY = os.environ.get("LEONARDO_API_KEY")  # 新增 Leonardo API Key
-# IMGUR_CLIENT_ID = os.environ.get("IMGUR_CLIENT_ID")
-# IMGUR_CLIENT_SECRET = os.environ.get("IMGUR_CLIENT_SECRET")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -56,6 +54,19 @@ story_current_paragraph = {}
 story_paragraphs = {}
 illustration_mode = {}
 practice_mode = {}
+
+# 這是被遺漏的變數定義，現在已經補上
+base_system_prompt = """
+你是「小繪」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
+請用簡潔、好讀的語氣回應，每則訊息盡量不超過 35 字並適當分段。
+
+第一階段：故事創作引導，請以「如果我有一個超能力」為主題，引導使用者想像一位主角、他擁有什麼超能力、他在哪裡、遇到什麼事件、解決了什麼問題，逐步發展成五段故事。
+不要主導故事，保持引導與陪伴。
+
+第二階段：繪圖引導，幫助使用者描述畫面，生成的繪圖上不要有故事的文字，並在完成後詢問是否需調整。
+
+請自稱「小繪」，以朋友般的語氣陪伴使用者完成創作。
+""".strip()
 
 @app.route("/")
 def index():
@@ -531,8 +542,6 @@ def handle_message(event):
         print("❌ 發生錯誤：", e)
         traceback.print_exc()
         line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪出了一點小狀況，請稍後再試 🙇"))
-
-# ... (其餘函數與路由保持不變)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
