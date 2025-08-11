@@ -500,4 +500,50 @@ def handle_message(event):
         if re.search(r"(取故事標題|幫我取故事標題|取標題|幫我想標題)", user_text):
             story_summary = story_summaries.get(user_id, "")
             if not story_summary:
-                line
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="目前還沒有故事大綱，請先完成故事內容喔！"))
+                return
+            
+            title_prompt = f"請根據以下故事大綱，產生三個適合的故事書標題，每個不超過8字，並用1. 2. 3. 編號：\n{story_summary}"
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "你是一位擅長為故事取名的AI，請根據故事大綱產生三個簡潔有創意的故事書標題，每個不超過8字。"},
+                    {"role": "user", "content": title_prompt}
+                ],
+                temperature=0.7,
+            )
+            titles = response.choices[0].message["content"].strip()
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text=f"這裡有三個故事標題選項：\n{titles}\n\n請回覆你最喜歡的編號或直接輸入標題！"
+            ))
+            save_to_firebase(user_id, "user", user_text)
+            save_to_firebase(user_id, "assistant", f"故事標題選項：\n{titles}")
+            return
+        
+        encouragement_suffix = ""
+        if user_sessions.get(user_id, {}).get("story_mode", False):
+            encouragement_suffix = random.choice([
+                "你真的很有創意！我喜歡這個設計！🌟",
+                "非常好，我覺得這個想法很不錯！👏",
+                "繼續加油，你做得很棒！💪",
+                "你真是故事大師！😊"
+            ])
+        
+        assistant_reply = get_openai_response(user_id, user_text, encouragement_suffix)
+
+        if not assistant_reply:
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時卡住了，請稍後再試喔"))
+            return
+
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
+        save_to_firebase(user_id, "user", user_text)
+        save_to_firebase(user_id, "assistant", assistant_reply)
+
+    except Exception as e:
+        print("❌ 發生錯誤：", e)
+        traceback.print_exc()
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪出了一點小狀況，請稍後再試 🙇"))
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
