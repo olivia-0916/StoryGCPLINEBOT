@@ -293,6 +293,9 @@ def generate_leonardo_image(user_id, prompt, reference_image_url=None):
             payload["init_generation_strength"] = 0.6
             print(f"🔗 正在使用參考圖片: {reference_image_url}")
 
+        # 💡 除錯步驟：在發送請求前印出完整的 payload
+        print(f"🎨 傳送給 Leonardo.Ai 的 payload: {json.dumps(payload, indent=2, ensure_ascii=False)}")
+
         print(f"🎨 呼叫 Leonardo.Ai API 產生圖片中，prompt: {prompt}")
         
         response = requests.post(api_url, headers=headers, json=payload)
