@@ -256,7 +256,7 @@ def save_to_firebase(user_id, role, text):
     except Exception as e:
         print(f"⚠️ 儲存 Firebase 失敗（{role}）：", e)
 
-# === 新增 Leonardo.Ai 圖片生成函式 ===
+# === 新增 Leonardo.Ai 圖片生成函式（除錯版本） ===
 def generate_leonardo_image(user_id, prompt, reference_image_url=None):
     """
     呼叫 Leonardo.Ai API 生成圖片，並可使用參考圖。
@@ -265,6 +265,9 @@ def generate_leonardo_image(user_id, prompt, reference_image_url=None):
         if not LEONARDO_API_KEY:
             print("❌ LEONARDO_API_KEY 環境變數未設定")
             return None
+        
+        # ⚠️ 除錯步驟：確認 API Key 讀取正確
+        print(f"DEBUG: 讀取到的 API Key 長度為: {len(LEONARDO_API_KEY)}")
 
         # Leonardo.Ai 的生成 API endpoint
         api_url = "https://cloud.leonardo.ai/api/v1/generations"
@@ -273,9 +276,12 @@ def generate_leonardo_image(user_id, prompt, reference_image_url=None):
             "Content-Type": "application/json"
         }
 
+        # ⚠️ 除錯步驟：使用一個簡單的、固定的 prompt
+        test_prompt = "A simple, beautiful watercolor illustration of a cat on a windowsill. No text, no words, no letters."
+
         payload = {
-            "prompt": prompt,
-            "modelId": "6bef9f1b-29cb-40c8-b9d5-341ac2e02ad6", # 推薦的 Leonardo Style 模型 ID
+            "prompt": test_prompt, # 替換為除錯用的固定 prompt
+            "modelId": "6bef9f1b-29cb-40c8-b9d5-341ac2e02ad6", 
             "height": 768,
             "width": 768,
             "num_images": 1,
@@ -289,23 +295,29 @@ def generate_leonardo_image(user_id, prompt, reference_image_url=None):
         # 如果有參考圖，就加入參考圖的參數
         if reference_image_url:
             payload["init_generation_image_url"] = reference_image_url
-            payload["init_generation_strength"] = 0.6 # 參考圖強度，可調整
+            payload["init_generation_strength"] = 0.6 
             print(f"🔗 正在使用參考圖片: {reference_image_url}")
 
-        print(f"🎨 呼叫 Leonardo.Ai API 產生圖片中，prompt: {prompt}")
+        print(f"🎨 呼叫 Leonardo.Ai API 產生圖片中，prompt: {test_prompt}")
         
         response = requests.post(api_url, headers=headers, json=payload)
+        
+        # 如果失敗，將錯誤資訊印出來
+        if not response.ok:
+            print(f"❌ API 請求失敗，狀態碼: {response.status_code}")
+            print(f"❌ 錯誤訊息: {response.text}")
+        
         response.raise_for_status()
 
+        # ... (後續程式碼不變)
         data = response.json()
         generation_id = data['sdGenerationJob']['generationId']
         print(f"✅ 生成任務 ID: {generation_id}")
 
-        # 開始輪詢，等待圖片生成完成
         image_url = wait_for_leonardo_image(generation_id)
         if image_url:
             print(f"✅ 圖片生成成功，URL: {image_url}")
-            return upload_to_gcs_from_url(image_url, user_id, prompt)
+            return upload_to_gcs_from_url(image_url, user_id, prompt) # 這裡依然用原本的 prompt 儲存
         else:
             print("❌ 圖片生成逾時或失敗")
             return None
