@@ -109,6 +109,9 @@ def reset_story_memory(user_id):
     # 重置一致性
     user_fixed_seed[user_id] = random.randint(100000, 999999)
     user_character_sheet[user_id] = ""
+    # 參考圖（URL 與 ID）
+    user_sessions[user_id]['reference_image_url'] = None
+    user_sessions[user_id]['reference_image_id'] = None
     print(f"✅ 已重置使用者 {user_id} 的故事記憶與一致性設定")
 
 def generate_story_summary(messages):
@@ -243,15 +246,48 @@ def save_to_firebase(user_id, role, text):
         print(f"⚠️ 儲存 Firebase 失敗（{role}）：", e)
 
 # ========= Leonardo.Ai =========
-def generate_leonardo_image(user_id, prompt, model_id=LUCID_ORIGIN_ID,
-                            reference_image_url=None, init_strength=None,
-                            use_enhance=True, seed=None, width=IMG_W, height=IMG_H):
-    """
-    - reference_image_url: 上一張當底（img2img）
-    - init_strength: 0~1，越小越接近原圖；建議 0.20~0.35
-    - use_enhance: 第一張 True，後續 False 降低漂移
-    - seed: 固定種子
-    """
+def wait_for_leonardo_image(generation_id, timeout=120):
+    """回傳 dict: {"url": <image_url>, "image_id": <id>}"""
+    start = time.time()
+    headers = {"Authorization": f"Bearer {LEONARDO_API_KEY}", "Accept": "application/json"}
+    url = f"{LEO_BASE}/generations/{generation_id}"
+
+    while time.time() - start < timeout:
+        time.sleep(3)
+        r = requests.get(url, headers=headers, timeout=30, allow_redirects=False)
+        if r.status_code >= 400:
+            print("❌ Leonardo GET 失敗:", r.status_code, r.text[:600])
+            r.raise_for_status()
+
+        data = r.json()
+        g = data.get("generations_by_pk") or {}
+        status = g.get("status")
+        if status == "COMPLETE":
+            imgs = g.get("images") or g.get("generated_images") or []
+            if imgs:
+                first = imgs[0]
+                return {"url": first.get("url") or first.get("image_url"),
+                        "image_id": first.get("id") or first.get("imageId")}
+            print("⚠️ 完成但沒有圖片資料")
+            return None
+        if status == "FAILED":
+            print("❌ Leonardo 任務失敗")
+            return None
+        print("⌛ 等待中… status =", status)
+    print("⏰ Leonardo 等待逾時")
+    return None
+
+def generate_leonardo_image(
+    user_id,
+    prompt,
+    model_id=LUCID_ORIGIN_ID,
+    reference_image_id=None,      # 用「上一張的 image_id」
+    init_strength=None,           # 0.20~0.35
+    use_enhance=True,
+    seed=None,
+    width=IMG_W,
+    height=IMG_H
+):
     if not LEONARDO_API_KEY:
         print("❌ LEONARDO_API_KEY 未設定")
         return None
@@ -278,63 +314,23 @@ def generate_leonardo_image(user_id, prompt, model_id=LUCID_ORIGIN_ID,
     if seed is not None:
         payload["seed"] = int(seed)
 
-    if reference_image_url and init_strength is not None:
-        payload["init_generation_image_url"] = reference_image_url
-        payload["init_strength"] = float(init_strength)
-        # 後續圖通常關閉增強避免漂移
-        payload["enhancePrompt"] = False
+    # 正確 img2img：帶 image_id + isInitImage + initStrength（駝峰）
+    if reference_image_id and init_strength is not None:
+        payload["isInitImage"] = True
+        payload["init_generation_image_id"] = reference_image_id
+        payload["initStrength"] = float(init_strength)
+        payload["enhancePrompt"] = False  # 降低漂移
 
-    try:
-        print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
-        resp = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
-                             timeout=45, allow_redirects=False)
-        if resp.status_code >= 400:
-            print("❌ Leonardo POST 失敗:", resp.status_code, resp.text[:600])
-            resp.raise_for_status()
+    print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
+    resp = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
+                         timeout=45, allow_redirects=False)
+    if resp.status_code >= 400:
+        print("❌ Leonardo POST 失敗:", resp.status_code, resp.text[:600])
+        resp.raise_for_status()
 
-        gen_id = resp.json()["sdGenerationJob"]["generationId"]
-        print("✅ Leonardo Generation ID:", gen_id)
-        return wait_for_leonardo_image(gen_id)
-    except Exception as e:
-        print("❌ Leonardo.Ai 圖片生成失敗:", e)
-        traceback.print_exc()
-        return None
-
-def wait_for_leonardo_image(generation_id, timeout=120):
-    start = time.time()
-    headers = {
-        "Authorization": f"Bearer {LEONARDO_API_KEY}",
-        "Accept": "application/json"
-    }
-    url = f"{LEO_BASE}/generations/{generation_id}"
-
-    while time.time() - start < timeout:
-        time.sleep(3)
-        try:
-            r = requests.get(url, headers=headers, timeout=30, allow_redirects=False)
-            if r.status_code >= 400:
-                print("❌ Leonardo GET 失敗:", r.status_code, r.text[:600])
-                r.raise_for_status()
-
-            data = r.json()
-            g = data.get("generations_by_pk") or {}
-            status = g.get("status")
-            if status == "COMPLETE":
-                imgs = g.get("images") or g.get("generated_images") or []
-                if imgs:
-                    return imgs[0].get("url") or imgs[0].get("image_url")
-                print("⚠️ 完成但沒有圖片 URL")
-                return None
-            elif status == "FAILED":
-                print("❌ Leonardo 任務失敗")
-                return None
-            else:
-                print("⌛ 等待中… status =", status)
-        except Exception as e:
-            print("❌ 輪詢錯誤:", e)
-            return None
-    print("⏰ Leonardo 等待逾時")
-    return None
+    gen_id = resp.json()["sdGenerationJob"]["generationId"]
+    print("✅ Leonardo Generation ID:", gen_id)
+    return wait_for_leonardo_image(gen_id)  # dict
 
 def upload_to_gcs_from_url(image_url, user_id, prompt):
     try:
@@ -376,7 +372,7 @@ def handle_message(event):
             return
 
         # 在故事模式下，自動產生第一張主角圖（建立角色設定卡、固定 seed）
-        if user_sessions.get(user_id, {}).get("story_mode", False) and 'reference_image_url' not in user_sessions[user_id]:
+        if user_sessions.get(user_id, {}).get("story_mode", False) and 'reference_image_id' not in user_sessions[user_id]:
             if user_message_counts.get(user_id, 0) >= 3:
                 messages = user_sessions.get(user_id, {}).get("messages", [])
                 summary = generate_story_summary(messages)
@@ -397,19 +393,20 @@ def handle_message(event):
                         if user_id not in user_fixed_seed:
                             user_fixed_seed[user_id] = random.randint(100000, 999999)
 
-                        url = generate_leonardo_image(
+                        result = generate_leonardo_image(
                             user_id=user_id,
                             prompt=user_character_sheet[user_id],
-                            reference_image_url=None,
+                            reference_image_id=None,
                             init_strength=None,
                             use_enhance=True,
                             seed=user_fixed_seed[user_id],
                             width=IMG_W, height=IMG_H
                         )
-                        if url:
-                            gcs_url = upload_to_gcs_from_url(url, user_id, optimized_prompt)
+                        if result and result.get("url"):
+                            gcs_url = upload_to_gcs_from_url(result["url"], user_id, optimized_prompt)
                             if gcs_url:
                                 user_sessions[user_id]['reference_image_url'] = gcs_url
+                                user_sessions[user_id]['reference_image_id'] = result.get("image_id")
                                 reply_messages = [
                                     TextSendMessage(text="這是主角的第一張圖："),
                                     ImageSendMessage(original_content_url=gcs_url, preview_image_url=gcs_url),
@@ -437,21 +434,23 @@ def handle_message(event):
             base_prefix = user_character_sheet.get(user_id, "")
             final_prompt = (base_prefix + " Cover composition. " + optimized_prompt) if base_prefix else optimized_prompt
 
-            ref_url = user_sessions.get(user_id, {}).get('reference_image_url')
+            ref_id = user_sessions.get(user_id, {}).get('reference_image_id')
             seed = user_fixed_seed.get(user_id)
 
-            url = generate_leonardo_image(
+            result = generate_leonardo_image(
                 user_id=user_id,
                 prompt=final_prompt,
-                reference_image_url=ref_url,   # 沿用角色設定卡 + 低強度 img2img
+                reference_image_id=ref_id,   # 用「上一張的 image_id」
                 init_strength=0.25,
                 use_enhance=False,
                 seed=seed,
                 width=IMG_W, height=IMG_H
             )
-            if url:
-                gcs_url = upload_to_gcs_from_url(url, user_id, final_prompt)
+            if result and result.get("url"):
+                gcs_url = upload_to_gcs_from_url(result["url"], user_id, final_prompt)
                 if gcs_url:
+                    user_sessions[user_id]['reference_image_url'] = gcs_url
+                    user_sessions[user_id]['reference_image_id'] = result.get("image_id")
                     reply_messages = [
                         TextSendMessage(text="這是你的封面："),
                         ImageSendMessage(original_content_url=gcs_url, preview_image_url=gcs_url),
@@ -493,23 +492,24 @@ def handle_message(event):
             base_prefix = user_character_sheet.get(user_id, "")
             final_prompt = (base_prefix + " Scene description: " + optimized_prompt) if base_prefix else optimized_prompt
 
-            ref_url = user_sessions.get(user_id, {}).get('reference_image_url')
+            ref_id = user_sessions.get(user_id, {}).get('reference_image_id')
             seed = user_fixed_seed.get(user_id)
 
-            url = generate_leonardo_image(
+            result = generate_leonardo_image(
                 user_id=user_id,
                 prompt=final_prompt,
-                reference_image_url=ref_url,
+                reference_image_id=ref_id,
                 init_strength=0.25,     # 20–35%
                 use_enhance=False,
                 seed=seed,
                 width=IMG_W, height=IMG_H
             )
-            if url:
-                gcs_url = upload_to_gcs_from_url(url, user_id, final_prompt)
+            if result and result.get("url"):
+                gcs_url = upload_to_gcs_from_url(result["url"], user_id, final_prompt)
                 if gcs_url:
-                    # 以最新一張作為下一張的參考
+                    # 更新「下一張」的參考 image_id
                     user_sessions[user_id]['reference_image_url'] = gcs_url
+                    user_sessions[user_id]['reference_image_id'] = result.get("image_id")
                     reply_messages = [
                         TextSendMessage(text=f"這是第 {paragraph_num + 1} 段故事的插圖："),
                         ImageSendMessage(original_content_url=gcs_url, preview_image_url=gcs_url)
