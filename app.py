@@ -1,5 +1,5 @@
 # app.py
-import os, sys, json, time, uuid, re, random, traceback, base64
+import os, sys, json, time, uuid, re, random, traceback
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -38,21 +38,30 @@ gcs_bucket = gcs_client.bucket(GCS_BUCKET)
 
 # Leonardo
 LEO_BASE = "https://cloud.leonardo.ai/api/rest/v1"
-LEO_MODEL = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"  # Lucid Origin（品質/速度平衡）
+LEO_MODEL = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"  # Lucid Origin
 IMG_W = 512
 IMG_H = 512
 
 # ----------------------------
 # 會話狀態
 # ----------------------------
-user_sessions = {}  # {user_id: {...}}
-# 保持一致性的核心資料
-user_fixed_seed       = {}  # 固定 seed
-user_character_sheet  = {}  # 主角設定卡（文字前綴）
-user_definitive_imgid = {}  # 定妝照 image_id
-user_definitive_url   = {}  # 定妝照 url
-user_world_state      = {}  # 世界觀（setting/time/mood/palette）
-user_scene_briefs     = {}  # 每段場景摘要（帶動作/互動）
+user_sessions = {}            # {user_id: {...}}
+user_fixed_seed = {}          # 固定 seed
+user_character_sheet = {}     # 主角設定卡（文字前綴）
+user_definitive_imgid = {}    # 定妝照 image_id
+user_definitive_url = {}      # 定妝照 url
+user_world_state = {}         # 世界觀（setting/time/mood/palette）
+user_scene_briefs = {}        # 每段場景摘要
+
+# 預設世界觀 + 安全存取
+DEFAULT_WORLD = {
+    "setting": "forest",
+    "time_of_day": "day",
+    "mood": "calm",
+    "palette": "soft watercolor palette, greens and warm light",
+}
+def get_world(user_id):
+    return user_world_state.setdefault(user_id, DEFAULT_WORLD.copy())
 
 # ----------------------------
 # OpenAI 簡易呼叫
@@ -100,7 +109,7 @@ def upload_to_gcs_from_url(url, user_id, prompt):
         return None
 
 # ----------------------------
-# 故事整理（加長 & 帶關鍵元素）
+# 故事整理（較長 & 帶元素）
 # ----------------------------
 def generate_story_summary(messages):
     prompt = (
@@ -115,7 +124,6 @@ def generate_story_summary(messages):
 def extract_paragraphs(summary):
     if not summary: return []
     lines = [re.sub(r"^\d+\.\s*","",x.strip()) for x in summary.split("\n") if x.strip()]
-    # 只取前 5 段
     return lines[:5]
 
 # ----------------------------
@@ -132,17 +140,19 @@ def build_scene_brief(paragraph, world_hint=None):
     try:
         data = json.loads(res)
         # 填補缺省
-        data.setdefault("setting", (world_hint or {}).get("setting","forest"))
-        data.setdefault("time_of_day",(world_hint or {}).get("time_of_day","day"))
-        data.setdefault("mood",(world_hint or {}).get("mood","calm"))
-        data.setdefault("foreground","main character performing the action")
-        data.setdefault("background","environmental elements supporting story")
-        data.setdefault("main_action","walking")
-        data.setdefault("interaction","natural interaction with objects or people")
-        data.setdefault("key_objects","")
-        return data
+        def _fallback(key, default):
+            return data.get(key) or (world_hint or {}).get(key) or default
+        return {
+            "setting":     _fallback("setting", "forest"),
+            "time_of_day": _fallback("time_of_day", "day"),
+            "mood":        _fallback("mood", "calm"),
+            "foreground":  data.get("foreground","main character performing the action"),
+            "background":  data.get("background","environmental elements supporting story"),
+            "main_action": data.get("main_action","walking"),
+            "interaction": data.get("interaction","natural interaction with objects or people"),
+            "key_objects": data.get("key_objects",""),
+        }
     except Exception:
-        # fallback
         return {
             "setting": (world_hint or {}).get("setting","forest"),
             "time_of_day": (world_hint or {}).get("time_of_day","day"),
@@ -158,7 +168,6 @@ def build_scene_brief(paragraph, world_hint=None):
 # 圖像 Prompt：主角一致性 + 動態敘事
 # ----------------------------
 def build_image_prompt(user_id, scene_brief, user_extra_desc=""):
-    # 一致性（默認東亞臉孔 + 穿著/標誌物）
     character = user_character_sheet.get(user_id) or (
         "Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
         "Whimsical watercolor storybook style. Primary ethnicity: East Asian features; black hair, dark brown eyes, warm fair skin. "
@@ -166,14 +175,8 @@ def build_image_prompt(user_id, scene_brief, user_extra_desc=""):
         "Signature outfit/items must appear on the main character only."
     )
 
-    world = user_world_state.get(user_id) or {
-        "setting": "forest",
-        "time_of_day": "day",
-        "mood": "calm",
-        "palette": "soft watercolor palette, greens and warm light"
-    }
+    world = get_world(user_id)
 
-    # 場景描述（動作/互動）
     parts = [
         character,
         "family-friendly, wholesome, uplifting tone, modest clothing, safe for work, non-violent.",
@@ -205,7 +208,7 @@ def leonardo_headers():
     return {"Authorization": f"Bearer {LEONARDO_API_KEY.strip()}",
             "Accept": "application/json", "Content-Type": "application/json"}
 
-def leonardo_tti(payload):  # text-to-image
+def leonardo_tti(payload):
     url = f"{LEO_BASE}/generations"
     r = requests.post(url, headers=leonardo_headers(), json=payload, timeout=45)
     if not r.ok:
@@ -230,10 +233,9 @@ def leonardo_poll(gen_id, timeout=120):
     return None, None
 
 def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_image_id=None, init_strength=None):
-    # 注意：img2img 正確欄位為 init_generation_image_id + init_strength
     payload = {
         "modelId": LEO_MODEL,
-        "prompt": prompt[:1500],    # 長度保護
+        "prompt": prompt[:1500],    # 安全長度
         "num_images": 1,
         "width": IMG_W, "height": IMG_H,
         "contrast": 3.0,
@@ -242,11 +244,10 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
         "negative_prompt": negative_prompt,
         "seed": int(seed)
     }
-
     if init_image_id and init_strength:
         payload["isInitImage"] = True
         payload["init_generation_image_id"] = init_image_id
-        payload["init_strength"] = float(init_strength)  # ✅ 正確 key
+        payload["init_strength"] = float(init_strength)   # ✅ 正確 key
 
     print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
     try:
@@ -257,7 +258,6 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
             gcs_url = upload_to_gcs_from_url(url, user_id, prompt)
             return {"url": gcs_url, "image_id": image_id}
     except requests.HTTPError as e:
-        # 若 img2img 參數不被接受 → 自動降級成 TTI
         if init_image_id and "Unexpected variable" in str(e):
             print("↩️ 自動降級：改用 text-to-image 重試（保留 seed 與 prompt）")
             return generate_leonardo_image(
@@ -307,8 +307,7 @@ def callback():
 def reset_session(user_id):
     user_sessions[user_id] = {"messages": [], "story_mode": True}
     user_fixed_seed[user_id] = random.randint(100000, 999999)
-    user_world_state[user_id] = {"setting":"forest","time_of_day":"day","mood":"calm",
-                                 "palette":"soft watercolor palette, greens and warm light"}
+    user_world_state[user_id] = DEFAULT_WORLD.copy()
     user_scene_briefs[user_id] = []
     print(f"✅ Reset session for {user_id}, seed={user_fixed_seed[user_id]}")
 
@@ -321,10 +320,6 @@ def handle_message(event):
     user_text = event.message.text.strip()
     reply_token = event.reply_token
     print(f"📩 {user_id}：{user_text}")
-
-    # 允許健康檢查時無 signer
-    if not LINE_CHANNEL_SECRET:
-        print("⚠️ LINE_CHANNEL_SECRET 未設，請確認環境變數。")
 
     try:
         # 啟動
@@ -348,28 +343,28 @@ def handle_message(event):
             )
             print("✨ 角色設定卡已更新:", user_character_sheet[user_id])
 
-        # 產生/更新故事摘要（較長 & 有元素）
+        # 整理 / 總結故事
         if re.search(r"(整理|總結|summary)", user_text):
             full = [{"role":"system","content":base_system_prompt}] + sess["messages"][-40:]
             summary = generate_story_summary(full)
             sess["summary"] = summary
             paras = extract_paragraphs(summary)
-            # 建立每段的 scene brief
-            world = user_world_state.get(user_id)
+
+            world = get_world(user_id)   # 🔧 一定有值
             briefs = []
             for p in paras:
                 b = build_scene_brief(p, world)
                 briefs.append(b)
-                # 世界觀以第 1 段為主（若有更明確再覆蓋）
+                existing = get_world(user_id)
                 user_world_state[user_id] = {
-                    "setting": b.get("setting", world["setting"]),
-                    "time_of_day": b.get("time_of_day", world["time_of_day"]),
-                    "mood": b.get("mood", world["mood"]),
-                    "palette": world.get("palette","soft watercolor palette")
+                    "setting":     b.get("setting",     existing.get("setting")),
+                    "time_of_day": b.get("time_of_day", existing.get("time_of_day")),
+                    "mood":        b.get("mood",        existing.get("mood")),
+                    "palette":     existing.get("palette", DEFAULT_WORLD["palette"]),
                 }
             user_scene_briefs[user_id] = briefs
 
-            # 回覆更長的整理
+            # 回覆較長的整理
             pretty = []
             for i, p in enumerate(paras, 1):
                 b = briefs[i-1]
@@ -378,11 +373,12 @@ def handle_message(event):
                     f"   場景：{b['setting']}｜時間：{b['time_of_day']}｜氛圍：{b['mood']}\n"
                     f"   重點：主角動作 {b['main_action']}；互動 {b['interaction']}；物件 {b['key_objects'] or '—'}"
                 )
-            line_bot_api.reply_message(reply_token, TextSendMessage("\n\n".join(pretty)))
-            save_chat(user_id, "assistant", "\n\n".join(prety for prety in pretty))
+            text_reply = "\n\n".join(pretty)
+            line_bot_api.reply_message(reply_token, TextSendMessage(text_reply))
+            save_chat(user_id, "assistant", text_reply)
             return
 
-        # 生成第一張定妝照（若尚未有）
+        # 生成第一張定妝照（若尚未有）或用「第一段」觸發
         if "定妝" in user_text or (user_definitive_imgid.get(user_id) is None and re.search(r"第一段", user_text)):
             if user_character_sheet.get(user_id) is None:
                 user_character_sheet[user_id] = (
@@ -393,8 +389,9 @@ def handle_message(event):
             seed = user_fixed_seed.setdefault(user_id, random.randint(100000,999999))
             prompt = user_character_sheet[user_id] + " family-friendly, wholesome, uplifting tone, modest clothing, safe for work, non-violent."
             result = generate_leonardo_image(
-                user_id=user_id, prompt=prompt, negative_prompt="text, letters, words, captions, subtitles, watermark, signature",
-                seed=seed, init_image_id=None, init_strength=None
+                user_id=user_id, prompt=prompt,
+                negative_prompt="text, letters, words, captions, subtitles, watermark, signature",
+                seed=seed
             )
             if result and result["url"]:
                 user_definitive_imgid[user_id] = result["image_id"]
@@ -412,13 +409,14 @@ def handle_message(event):
             idx_map = {'一':1,'二':2,'三':3,'四':4,'五':5,'1':1,'2':2,'3':3,'4':4,'5':5}
             n = idx_map.get(m.group(0),1) - 1
 
-            # 若還沒有摘要，先做一次
+            # 若還沒有摘要/briefs → 先整理一次
             if not user_scene_briefs.get(user_id):
                 full = [{"role":"system","content":base_system_prompt}] + sess["messages"][-40:]
                 summary = generate_story_summary(full)
                 sess["summary"] = summary
                 paras = extract_paragraphs(summary)
-                briefs = [build_scene_brief(p, user_world_state.get(user_id)) for p in paras]
+                world = get_world(user_id)
+                briefs = [build_scene_brief(p, world) for p in paras]
                 user_scene_briefs[user_id] = briefs
 
             briefs = user_scene_briefs.get(user_id, [])
@@ -427,17 +425,14 @@ def handle_message(event):
                 return
 
             scene = briefs[n]
-            # 取使用者附加描述（句尾補充）
             extra = re.sub(r".*段故事的圖", "", user_text).strip(" ，,。.!！")
             prompt, neg = build_image_prompt(user_id, scene, extra)
 
-            # 若有定妝照 → img2img 低強度
             ref_id = user_definitive_imgid.get(user_id)
             seed   = user_fixed_seed.setdefault(user_id, random.randint(100000,999999))
             result = generate_leonardo_image(
                 user_id=user_id, prompt=prompt, negative_prompt=neg,
-                seed=seed,
-                init_image_id=ref_id, init_strength=0.24 if ref_id else None
+                seed=seed, init_image_id=ref_id, init_strength=0.24 if ref_id else None
             )
 
             if result and result["url"]:
@@ -455,7 +450,6 @@ def handle_message(event):
 
         # 一般對話 → 繼續引導創作
         sysmsg = base_system_prompt
-        # 附帶目前摘要，利於延續
         summary = user_sessions[user_id].get("summary","")
         if summary:
             sysmsg += f"\n【故事摘要】\n{summary}\n請延續互動。"
