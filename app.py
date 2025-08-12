@@ -8,7 +8,7 @@ import uuid
 import requests
 import time
 from datetime import datetime
-from flask import Flask, request, abort
+from flask import Flask, request, abort, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
@@ -104,15 +104,52 @@ base_system_prompt = """
 def index():
     return "LINE GPT Webhook is running!"
 
+# 健康檢查，避免監控打到 /callback
+@app.route("/_ah/health")
+def health():
+    return "ok", 200
+
+# 管理端：不經 LINE 測圖
+@app.route("/admin/generate", methods=["POST"])
+def admin_generate():
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id", "debug_user")
+    prompt = data.get("prompt", "a cozy watercolor scene")
+    ref = user_canonical_image_id.get(user_id)
+    seed = user_fixed_seed.get(user_id) or random.randint(100000, 999999)
+    res = generate_leonardo_image(
+        user_id=user_id,
+        prompt=prompt,
+        reference_image_id=ref,
+        init_strength=0.24 if ref else None,
+        use_enhance=not bool(ref),
+        seed=seed,
+        width=IMG_W, height=IMG_H
+    )
+    return jsonify(res or {"error": "failed"})
+
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
+
+    # 非 LINE 來源（沒有簽章）直接忽略，避免 None.encode() 與 500
+    if not signature:
+        print("⚠️ Missing X-Line-Signature — non-LINE request (axios/Postman/healthcheck?). Ignored.")
+        return "IGNORED", 200
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        abort(400)
-    return "OK"
+        print("❌ Invalid LINE signature. Check LINE_CHANNEL_SECRET and request origin.")
+        return "Bad signature", 400
+    except Exception as e:
+        print("❌ Unexpected error in /callback:", e)
+        traceback.print_exc()
+        # 回 200，避免 LINE 一直重試
+        return "OK", 200
+
+    return "OK", 200
 
 # ========= 工具 =========
 def reset_story_memory(user_id):
@@ -173,21 +210,16 @@ def extract_story_paragraphs(summary):
 
 # --------- 內容審查安全/長度工具 ---------
 def _ensure_once(text: str, needle: str) -> str:
-    """確保 needle 僅附加一次。"""
     if needle.strip().lower() in (text or "").lower():
         return text
     return (text + " " + needle).strip()
 
 def _clamp_prompt_length(text: str, max_len: int = 1450) -> str:
-    """Leonardo 上限 1500，保守 1450；超過即截斷。"""
     t = re.sub(r'\s+', ' ', text or '').strip()
     return t if len(t) <= max_len else t[:max_len]
 
 def _sanitize_text_for_moderation(text: str) -> str:
-    """統一淨化，避免誤判與重複附加造成超長。"""
     t = text or ""
-
-    # 一般淨化
     t = re.sub(r'\b\d{1,2}\s*[-]?\s*year[-\s]?old\b', 'adult', t, flags=re.IGNORECASE)
     t = re.sub(r'(\d{1,2})\s*歲|(\d{1,2})\s*岁', '成人', t)
     t = re.sub(r'\bgirl\b', 'woman', t, flags=re.IGNORECASE)
@@ -195,12 +227,8 @@ def _sanitize_text_for_moderation(text: str) -> str:
     t = re.sub(r'children?\s+picture[-\s]?book', 'whimsical watercolor storybook', t, flags=re.IGNORECASE)
     t = re.sub(r'\b(child|kid)\b', 'character', t, flags=re.IGNORECASE)
     t = re.sub(r'white\s+dress', 'flowing light-colored outfit', t, flags=re.IGNORECASE)
-
-    # 風格與安全尾註（只附加一次）
     t = _ensure_once(t, SAFE_STYLE_LINE)
     t = _ensure_once(t, SAFETY_SUFFIX)
-
-    # 長度限制
     t = _clamp_prompt_length(t, 1450)
     return t
 
@@ -350,7 +378,6 @@ def generate_leonardo_image(
         print("❌ LEONARDO_API_KEY 未設定")
         return None
 
-    # 基本負向詞
     base_negative = "text, letters, words, captions, subtitles, watermark, signature, different character, change hairstyle, change outfit, age change, gender change"
     if extra_negative:
         base_negative = base_negative + ", " + extra_negative
@@ -362,7 +389,6 @@ def generate_leonardo_image(
         "User-Agent": "storybot/1.0"
     }
 
-    # 送出前安全處理 + 長度壓制
     safe_prompt = _sanitize_text_for_moderation(prompt)
     safe_prompt = _clamp_prompt_length(safe_prompt, 1450)
 
@@ -380,7 +406,6 @@ def generate_leonardo_image(
     if seed is not None:
         payload["seed"] = int(seed)
 
-    # 驗證 ref id（簡單 UUID）
     def _is_valid_uuid(s: str) -> bool:
         return bool(re.match(r"^[0-9a-fA-F-]{36}$", s or ""))
 
@@ -402,14 +427,12 @@ def generate_leonardo_image(
             compact = re.sub(r'\s+', ' ', prompt or '').strip()
             m = re.search(r"Scene description:\s*(.*)$", compact, re.IGNORECASE)
             scene_only = m.group(1) if m else compact
-            # 去掉規則句，保留場景
             scene_only = re.sub(r'\b(The main character|Only the main character|Do not [^.]+)\.', '', scene_only, flags=re.IGNORECASE)
             scene_only = _sanitize_text_for_moderation(scene_only)
             scene_only = _clamp_prompt_length(scene_only, 900)
 
             payload["prompt"] = scene_only
             payload["enhancePrompt"] = False
-            # 降級成 T2I
             payload.pop("isInitImage", None)
             payload.pop("init_generation_image_id", None)
             payload.pop("initStrength", None)
@@ -830,9 +853,8 @@ def handle_message(event):
             mc_present = main_character_present(user_text, story_text)
             name = user_main_character_name.get(user_id, "")
 
-            # 優化本段 prompt
+            # 優化本段 prompt + 場景保底
             optimized_prompt = optimize_image_prompt(story_text, user_extra_desc or "watercolor storybook style")
-            # ---- 場景保底：若看起來不是場景描述，就補上 ----
             if not re.search(r'\b(scene|illustration|depict|show|composition)\b', optimized_prompt, re.IGNORECASE):
                 optimized_prompt = f"Illustration of the scene: {optimized_prompt}"
 
@@ -878,7 +900,7 @@ def handle_message(event):
                 prompt=final_prompt,
                 reference_image_id=ref_id,
                 init_strength=init_strength,
-                use_enhance=False,   # 堅持關閉，降低誤判與風格漂移
+                use_enhance=False,   # 關閉以降低漂移
                 seed=seed,
                 width=IMG_W, height=IMG_H,
                 extra_negative=extra_neg_str
