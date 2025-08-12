@@ -18,6 +18,7 @@ from firebase_admin import credentials, firestore
 import base64
 import random
 from google.cloud import storage
+from collections import Counter
 
 # ========= 基本設定 =========
 sys.stdout.reconfigure(encoding='utf-8')
@@ -72,6 +73,10 @@ user_signature_features = {}         # 主角招牌裝飾/著裝（英文清單�
 # 主角名字記名
 user_main_character_name = {}        # user_id -> 名字
 
+# 世界預設 + 語意分鏡
+user_world_defaults = {}             # user_id -> {"setting","time_of_day","mood","palette"}
+user_storyboard = {}                 # user_id -> list of paragraphs dicts
+
 # ========= 常數 =========
 LEO_BASE = "https://cloud.leonardo.ai/api/rest/v1"
 LUCID_ORIGIN_ID = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"  # Lucid Origin
@@ -84,7 +89,7 @@ DEFAULT_ETHNICITY_LINE = (
 )
 
 SAFE_STYLE_LINE = "Whimsical watercolor storybook illustration style."
-# 新安全尾註：不再出現 sex/minor/PG 等字眼，避免誤判
+# 保守安全尾註（不含容易誤判的詞）
 SAFETY_SUFFIX = "family-friendly, wholesome, uplifting tone, modest clothing, safe for work, non-violent."
 
 # ========= 系統提示 =========
@@ -172,6 +177,9 @@ def reset_story_memory(user_id):
     user_allow_ethnicity_override[user_id] = False
     user_signature_features[user_id] = ""
     user_main_character_name[user_id] = ""
+    # 世界預設與分鏡
+    user_world_defaults[user_id] = {}
+    user_storyboard[user_id] = []
     print(f"✅ 已重置使用者 {user_id} 的故事記憶與一致性設定")
 
 def generate_story_summary(messages):
@@ -278,7 +286,7 @@ def get_openai_response(user_id, user_message, encouragement_suffix=""):
     if user_id not in story_current_paragraph:
         story_current_paragraph[user_id] = 0
 
-    # 中性 fallback（移除不友善那句）
+    # 中性 fallback
     low_engagement_inputs = ["不知道", "沒靈感", "嗯", "算了", "不想說", "先跳過", "跳過這題"]
     if any(phrase in user_message.strip().lower() for phrase in low_engagement_inputs):
         assistant_reply = "沒關係，我們可以慢慢想 👣"
@@ -330,6 +338,137 @@ def save_to_firebase(user_id, role, text):
     except Exception as e:
         print(f"⚠️ 儲存 Firebase 失敗（{role}）：", e)
 
+# ========= 語意分鏡與世界預設 =========
+def generate_semantic_storyboard(messages):
+    """
+    讀對話 → 產出每段分鏡 JSON：
+    {
+      "paragraphs":[
+        {"setting":"enchanted forest","time_of_day":"day","mood":"warm",
+         "foreground":"...","background":"...",
+         "characters":[{"name":"Kaka","role":"main","age":"adult","appearance":"long black hair, red floral dress, East Asian facial features"}],
+         "key_objects":["magic backpack","pancake machine"]}
+      ]
+    }
+    """
+    try:
+        sys_prompt = (
+            "You are a storyboard extractor. Read the conversation/story and output a compact JSON with a 'paragraphs' array. "
+            "Each item must include: setting, time_of_day, mood, foreground, background, key_objects (array), "
+            "and characters (array of {name?, role(main/support/none), age(adult), appearance}). "
+            "Prefer concise English phrases. If something is missing, make a best guess based on earlier context. "
+            "Never include any commentary. Valid JSON only."
+        )
+        content = "\n".join([f"{m['role']}: {m['content']}" for m in messages if m.get("content")])
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"system","content":sys_prompt},{"role":"user","content":content}],
+            temperature=0.2,
+        )
+        raw = resp.choices[0].message["content"].strip()
+        data = json.loads(raw)
+        if not isinstance(data, dict) or "paragraphs" not in data:
+            raise ValueError("no paragraphs")
+        # 緊縮每段字串
+        for p in data["paragraphs"]:
+            for k in ["setting","time_of_day","mood","foreground","background"]:
+                if k in p and isinstance(p[k], str):
+                    p[k] = re.sub(r"\s+", " ", p[k]).strip()[:200]
+        return data
+    except Exception as e:
+        print("❌ generate_semantic_storyboard 失敗：", e)
+        return {"paragraphs":[]}
+
+def derive_world_defaults_from_board(board, current_defaults=None):
+    """
+    從分鏡推論世界預設：setting/mood/time_of_day/調色。若已有預設就不覆蓋強者（以第一次為主）。
+    """
+    defaults = dict(current_defaults or {})
+    paragraphs = (board or {}).get("paragraphs") or []
+    if paragraphs:
+        if not defaults.get("setting"):
+            settings = [p.get("setting","").strip() for p in paragraphs if p.get("setting")]
+            if settings:
+                defaults["setting"] = Counter(settings).most_common(1)[0][0]
+        if not defaults.get("time_of_day"):
+            tods = [p.get("time_of_day","").strip() for p in paragraphs if p.get("time_of_day")]
+            if tods:
+                defaults["time_of_day"] = tods[0]
+        if not defaults.get("mood"):
+            moods = [p.get("mood","").strip() for p in paragraphs if p.get("mood")]
+            if moods:
+                defaults["mood"] = moods[0]
+    if not defaults.get("palette"):
+        defaults["palette"] = "soft watercolor palette, greens and warm light"
+    return defaults
+
+def compose_scene_prompt(user_id, paragraph_idx, fallback_story_text: str, user_extra_desc: str):
+    # 世界預設
+    wd = user_world_defaults.get(user_id) or {}
+    setting = wd.get("setting", "")
+    time_of_day = wd.get("time_of_day", "")
+    mood = wd.get("mood", "")
+    palette = wd.get("palette", "")
+
+    # 分鏡（若有）
+    sb = user_storyboard.get(user_id) or []
+    if 0 <= paragraph_idx < len(sb):
+        p = sb[paragraph_idx]
+        setting = p.get("setting") or setting
+        time_of_day = p.get("time_of_day") or time_of_day
+        mood = p.get("mood") or mood
+        fg = p.get("foreground","")
+        bg = p.get("background","")
+        key_objs = ", ".join(p.get("key_objects") or [])
+        # 角色：如果主角有 appearance，就補到 final（再加 signature features）
+        main_name = user_main_character_name.get(user_id, "")
+        main_appearance = ""
+        for ch in (p.get("characters") or []):
+            if (ch.get("role") or "").lower() == "main":
+                main_appearance = ch.get("appearance","")
+                break
+        sig = user_signature_features.get(user_id, "")
+        if sig:
+            main_appearance = (main_appearance + ", " + sig).strip(", ").strip()
+
+        # 組 scene 描述
+        scene_bits = [
+            f"setting: {setting}" if setting else "",
+            f"time of day: {time_of_day}" if time_of_day else "",
+            f"mood: {mood}" if mood else "",
+            f"foreground: {fg}" if fg else "",
+            f"background: {bg}" if bg else "",
+            f"key objects: {key_objs}" if key_objs else "",
+            f"main character appearance: {main_appearance}" if main_appearance else ""
+        ]
+        scene_desc = ", ".join([b for b in scene_bits if b])
+
+        # 使用者額外描述
+        extra = user_extra_desc.strip()
+        if extra:
+            scene_desc = (scene_desc + ". " + extra).strip(". ")
+
+        # 角色卡 + 場景
+        base_prefix = user_character_sheet.get(user_id, "")
+        final_prompt = (base_prefix + " " + SAFE_STYLE_LINE + " Scene description: " + scene_desc).strip()
+        # 安全與長度控制
+        final_prompt = _sanitize_text_for_moderation(final_prompt)
+        final_prompt = _clamp_prompt_length(final_prompt, 1450)
+        return final_prompt
+
+    # 若沒有 storyboard 該段，退回舊法
+    optimized = optimize_image_prompt(fallback_story_text, user_extra_desc or "watercolor storybook style")
+    if setting:
+        optimized = f"setting: {setting}. {optimized}"
+    if mood:
+        optimized = f"{optimized} mood: {mood}"
+    if palette:
+        optimized = f"{optimized} palette: {palette}"
+    base_prefix = user_character_sheet.get(user_id, "")
+    final_prompt = (base_prefix + " " + SAFE_STYLE_LINE + " Scene description: " + optimized).strip()
+    final_prompt = _sanitize_text_for_moderation(final_prompt)
+    return _clamp_prompt_length(final_prompt, 1450)
+
 # ========= Leonardo.Ai =========
 def wait_for_leonardo_image(generation_id, timeout=120):
     """回傳 dict: {"url": <image_url>, "image_id": <id>}"""
@@ -345,7 +484,8 @@ def wait_for_leonardo_image(generation_id, timeout=120):
             r.raise_for_status()
 
         data = r.json()
-        g = data.get("generations_by_pk") or {}
+        # 適配 v1/v2 結構
+        g = data.get("generations_by_pk") or data.get("generations_v2", [{}])[0] or {}
         status = g.get("status")
         if status == "COMPLETE":
             imgs = g.get("images") or g.get("generated_images") or []
@@ -533,6 +673,8 @@ def set_main_character_name(user_id: str, name: str):
         base = (base + " " + name_line).strip()
     if SAFE_STYLE_LINE not in base:
         base = (SAFE_STYLE_LINE + " " + base).strip()
+    if SAFETY_SUFFIX.strip().lower() not in base.lower():
+        base += " " + SAFETY_SUFFIX
     user_character_sheet[user_id] = base
     print(f"📝 已設定主角名字：{name}")
 
@@ -560,7 +702,7 @@ def augment_character_sheet_from_user(user_id, zh_desc: str):
 
         prompt = (
             "把以下中文人物外觀描述轉成英文、簡潔的特徵清單，用逗號分隔，"
-            "例如: 'blue shirt, flower hair clip, short black hair'. 僅輸出特徵，不要多餘說明。\n"
+            "例如: 'red floral dress, long black hair, flower hair clip'. 僅輸出特徵，不要多餘說明。\n"
             f"{zh_desc}"
         )
         resp = openai.ChatCompletion.create(
@@ -658,6 +800,8 @@ def handle_message(event):
             user_allow_ethnicity_override[user_id] = False
             user_signature_features[user_id] = ""
             user_main_character_name[user_id] = ""
+            user_world_defaults[user_id] = {}
+            user_storyboard[user_id] = []
             line_bot_api.reply_message(reply_token, TextSendMessage(text="已重設角色與種子，請描述主角外觀或告訴我名字，我來建立定妝照。"))
             return
 
@@ -677,7 +821,14 @@ def handle_message(event):
                 if summary:
                     story_paragraphs[user_id] = extract_story_paragraphs(summary)
                     story_summaries[user_id] = summary
-                    first_paragraph_prompt = story_paragraphs[user_id][0]
+
+                    # 建立 storyboard + world defaults
+                    board = generate_semantic_storyboard(messages)
+                    if board and board.get("paragraphs"):
+                        user_storyboard[user_id] = board["paragraphs"]
+                        user_world_defaults[user_id] = derive_world_defaults_from_board(board, user_world_defaults.get(user_id))
+
+                    first_paragraph_prompt = story_paragraphs[user_id][0] if story_paragraphs[user_id] else ""
                     optimized_prompt = optimize_image_prompt(first_paragraph_prompt, "watercolor, storybook style")
 
                     if optimized_prompt:
@@ -734,13 +885,28 @@ def handle_message(event):
                 augment_character_sheet_from_user(user_id, cover_prompt_raw)
                 regenerate_canonical_portrait(user_id, seed=user_fixed_seed.get(user_id))
 
+            # 更新 storyboard/world defaults
+            msgs = user_sessions.get(user_id, {}).get("messages", [])
+            board = generate_semantic_storyboard(msgs)
+            if board and board.get("paragraphs"):
+                user_storyboard[user_id] = board["paragraphs"]
+                user_world_defaults[user_id] = derive_world_defaults_from_board(board, user_world_defaults.get(user_id))
+
             optimized_prompt = optimize_image_prompt(summary_for_cover, f"cover, {cover_prompt_raw}, watercolor storybook style")
             if not optimized_prompt:
                 optimized_prompt = f"storybook cover, watercolor, vibrant, central composition, no text or letters. theme: {story_title}. {cover_prompt_raw}"
                 optimized_prompt = _sanitize_text_for_moderation(optimized_prompt)
 
             base_prefix = user_character_sheet.get(user_id, "")
-            final_prompt = (base_prefix + " Cover composition. " + optimized_prompt) if base_prefix else optimized_prompt
+            # 帶世界預設關鍵字
+            wd = user_world_defaults.get(user_id) or {}
+            wd_bits = []
+            if wd.get("setting"): wd_bits.append(f"setting: {wd['setting']}")
+            if wd.get("mood"): wd_bits.append(f"mood: {wd['mood']}")
+            if wd.get("time_of_day"): wd_bits.append(f"time of day: {wd['time_of_day']}")
+            if wd.get("palette"): wd_bits.append(f"palette: {wd['palette']}")
+            world_hint = (". " + ", ".join(wd_bits)) if wd_bits else ""
+            final_prompt = (base_prefix + " Cover composition. " + optimized_prompt + world_hint).strip()
 
             ref_id = user_canonical_image_id.get(user_id)
             if not ref_id:
@@ -781,7 +947,7 @@ def handle_message(event):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時畫不出封面，換句話再描述看看 🖍️"))
             return
 
-        # 第 N 段：沿用設定卡 + 低強度 img2img(定妝照) + 固定 seed
+        # 第 N 段：沿用設定卡 + 世界預設 + 分鏡補齊 + 低強度 img2img(定妝照) + 固定 seed
         if re.search(r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)", user_text):
             match = re.search(r"[一二三四五12345]", user_text)
             paragraph_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
@@ -792,6 +958,12 @@ def handle_message(event):
             if new_summary:
                 story_paragraphs[user_id] = extract_story_paragraphs(new_summary)
                 story_summaries[user_id] = new_summary
+
+            # 生成或更新語意分鏡與世界預設
+            board = generate_semantic_storyboard(messages)
+            if board and board.get("paragraphs"):
+                user_storyboard[user_id] = board["paragraphs"]
+                user_world_defaults[user_id] = derive_world_defaults_from_board(board, user_world_defaults.get(user_id))
 
             # 取到第 N 段（不足就簡單補上）
             def ensure_paragraph(user_id, target_idx):
@@ -853,20 +1025,8 @@ def handle_message(event):
             mc_present = main_character_present(user_text, story_text)
             name = user_main_character_name.get(user_id, "")
 
-            # 優化本段 prompt + 場景保底
-            optimized_prompt = optimize_image_prompt(story_text, user_extra_desc or "watercolor storybook style")
-            if not re.search(r'\b(scene|illustration|depict|show|composition)\b', optimized_prompt, re.IGNORECASE):
-                optimized_prompt = f"Illustration of the scene: {optimized_prompt}"
-
-            base_prefix = user_character_sheet.get(user_id, "")
-            scene_rules = []
-            if name:
-                scene_rules.append(f"The main character is named {name}. Do not print any text or the name in the image.")
-            if mc_present:
-                scene_rules.append("The main character appears in this scene. Only the main character uses the signature outfit/items; other characters wear different outfits.")
-            else:
-                scene_rules.append("The main character does not appear in this scene. Do not include the main character. Do not transfer the main character's signature items to any other characters.")
-            final_prompt = (base_prefix + " " + SAFE_STYLE_LINE + " " + " ".join(scene_rules) + " Scene description: " + optimized_prompt).strip()
+            # 組合「帶世界預設/分鏡補齊」的 prompt
+            final_prompt = compose_scene_prompt(user_id, paragraph_num, story_text, user_extra_desc)
 
             # 動態負向詞
             extra_neg = []
@@ -893,7 +1053,7 @@ def handle_message(event):
                 init_strength = 0.24
             seed = user_fixed_seed.get(user_id)
 
-            print(f"[DEBUG] N={paragraph_num+1}, mc_present={mc_present}, ref_id={ref_id}, use_enhance=False, prompt_len={len(final_prompt)}")
+            print(f"[DEBUG] N={paragraph_num+1}, mc_present={mc_present}, ref_id={ref_id}, world={user_world_defaults.get(user_id)}, prompt_len={len(final_prompt)}")
 
             result = generate_leonardo_image(
                 user_id=user_id,
