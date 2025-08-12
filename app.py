@@ -61,9 +61,13 @@ practice_mode = {}
 user_fixed_seed = {}        # 每位使用者固定 seed
 user_character_sheet = {}   # 角色設定卡（前綴）
 
+# 定妝照（canonical portrait）：固定參考，避免逐張漂移
+user_canonical_image_id = {}   # user_id -> image_id
+user_canonical_image_url = {}  # user_id -> gcs url（方便預覽）
+
 # ========= 常數 =========
 LEO_BASE = "https://cloud.leonardo.ai/api/rest/v1"
-LUCID_ORIGIN_ID = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"  # Lucid Origin（依官方文件而定）
+LUCID_ORIGIN_ID = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"  # Lucid Origin
 IMG_W = 512
 IMG_H = 512
 
@@ -109,9 +113,9 @@ def reset_story_memory(user_id):
     # 重置一致性
     user_fixed_seed[user_id] = random.randint(100000, 999999)
     user_character_sheet[user_id] = ""
-    # 參考圖（URL 與 ID）
-    user_sessions[user_id]['reference_image_url'] = None
-    user_sessions[user_id]['reference_image_id'] = None
+    # 清空定妝照
+    user_canonical_image_id[user_id] = None
+    user_canonical_image_url[user_id] = None
     print(f"✅ 已重置使用者 {user_id} 的故事記憶與一致性設定")
 
 def generate_story_summary(messages):
@@ -256,7 +260,7 @@ def wait_for_leonardo_image(generation_id, timeout=120):
         time.sleep(3)
         r = requests.get(url, headers=headers, timeout=30, allow_redirects=False)
         if r.status_code >= 400:
-            print("❌ Leonardo GET 失敗:", r.status_code, r.text[:600])
+            print("❌ Leonardo GET 失敗:", r.status_code, r.text[:800])
             r.raise_for_status()
 
         data = r.json()
@@ -281,7 +285,7 @@ def generate_leonardo_image(
     user_id,
     prompt,
     model_id=LUCID_ORIGIN_ID,
-    reference_image_id=None,      # 用「上一張的 image_id」
+    reference_image_id=None,      # 用「定妝照 image_id」
     init_strength=None,           # 0.20~0.35
     use_enhance=True,
     seed=None,
@@ -313,10 +317,9 @@ def generate_leonardo_image(
     if seed is not None:
         payload["seed"] = int(seed)
 
-    # 驗證 ref id（必須像 UUID），否則視為無效
+    # 驗證 ref id 形式（簡單 UUID 檢查）
     def _is_valid_uuid(s: str) -> bool:
-        import re as _re
-        return bool(_re.match(r"^[0-9a-fA-F-]{36}$", s or ""))
+        return bool(re.match(r"^[0-9a-fA-F-]{36}$", s or ""))
 
     use_img2img = bool(reference_image_id and init_strength is not None and _is_valid_uuid(reference_image_id))
     if use_img2img:
@@ -330,21 +333,19 @@ def generate_leonardo_image(
                          timeout=45, allow_redirects=False)
 
     if resp.status_code >= 400:
-        # 印出完整錯誤，利於定位
         try:
             print("❌ Leonardo POST 失敗:", resp.status_code, resp.text[:800])
         except Exception:
             pass
 
-        # 若是 img2img 觸發的 400，降級重試一次：改走 text-to-image
+        # img2img 400 → 自動降級為 text-to-image
         if use_img2img:
             print("↩️ 自動降級：改用 text-to-image 重試（保留 seed 與 prompt）")
             try:
-                # 移除 img2img 相關欄位
                 payload.pop("isInitImage", None)
                 payload.pop("init_generation_image_id", None)
                 payload.pop("initStrength", None)
-                payload["enhancePrompt"] = bool(use_enhance)  # 恢復原設定
+                payload["enhancePrompt"] = bool(use_enhance)
 
                 resp2 = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
                                       timeout=45, allow_redirects=False)
@@ -358,7 +359,6 @@ def generate_leonardo_image(
                 print("❌ 降級重試例外：", e)
                 return None
 
-        # 非 img2img 或降級也失敗 → 拋出
         try:
             resp.raise_for_status()
         except Exception:
@@ -367,7 +367,6 @@ def generate_leonardo_image(
     gen_id = resp.json()["sdGenerationJob"]["generationId"]
     print("✅ Leonardo Generation ID:", gen_id)
     return wait_for_leonardo_image(gen_id)  # dict
-
 
 def upload_to_gcs_from_url(image_url, user_id, prompt):
     try:
@@ -391,6 +390,102 @@ def upload_to_gcs_from_url(image_url, user_id, prompt):
         traceback.print_exc()
         return None
 
+# ========= 一致性：外觀特徵與定妝照 =========
+def augment_character_sheet_from_user(user_id, zh_desc: str):
+    """把使用者外觀（中文）轉成英文特徵加入角色設定卡"""
+    if not zh_desc or not zh_desc.strip():
+        return
+    try:
+        prompt = (
+            "把以下中文人物外觀描述轉成英文、簡潔的特徵清單，用逗號分隔，"
+            "例如: 'blue shirt, flower hair clip, short black hair'. 僅輸出特徵，不要多餘說明。\n"
+            f"{zh_desc}"
+        )
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        features = resp.choices[0].message["content"].strip()
+        base = user_character_sheet.get(user_id, "")
+        if "Consistent main character" not in base:
+            base = ("Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
+                    "Watercolor children picture-book style. ") + base
+        user_character_sheet[user_id] = base + " Always: " + features + ". "
+        print(f"✨ 角色設定卡已更新: {user_character_sheet[user_id]}")
+    except Exception as e:
+        print("❌ augment_character_sheet_from_user 失敗：", e)
+
+def regenerate_canonical_portrait(user_id, seed=None):
+    """用角色設定卡生成/重生成主角定妝照，回傳 (url, image_id)"""
+    if seed is None:
+        seed = user_fixed_seed.get(user_id) or random.randint(100000, 999999)
+        user_fixed_seed[user_id] = seed
+    prompt = user_character_sheet.get(user_id) or "Watercolor picture-book style, consistent main character."
+    result = generate_leonardo_image(
+        user_id=user_id,
+        prompt=prompt,
+        reference_image_id=None,
+        init_strength=None,
+        use_enhance=True,
+        seed=seed,
+        width=IMG_W, height=IMG_H
+    )
+    if result and result.get("url"):
+        gcs_url = upload_to_gcs_from_url(result["url"], user_id, "[canonical portrait]")
+        if gcs_url:
+            user_canonical_image_id[user_id] = result.get("image_id")
+            user_canonical_image_url[user_id] = gcs_url
+            print(f"✅ 已更新定妝照：id={user_canonical_image_id[user_id]}, url={gcs_url}")
+            return gcs_url, user_canonical_image_id[user_id]
+    return None, None
+
+# ========= 補段：不足時自動續一段 =========
+def ensure_paragraph(user_id, target_idx):
+    """
+    回傳第 target_idx 段（0-based）。若摘要不足，就用 OpenAI 續寫一段補上，並更新快取。
+    """
+    paragraphs = story_paragraphs.get(user_id) or []
+    summary_text = story_summaries.get(user_id, "")
+
+    if 0 <= target_idx < len(paragraphs):
+        return paragraphs[target_idx]
+
+    if not summary_text:
+        messages = user_sessions.get(user_id, {}).get("messages", [])
+        new_summary = generate_story_summary(messages)
+        if new_summary:
+            story_summaries[user_id] = new_summary
+            paragraphs = extract_story_paragraphs(new_summary)
+            story_paragraphs[user_id] = paragraphs
+
+    if target_idx >= len(paragraphs):
+        try:
+            context = "\n".join([f"{i+1}. {p}" for i, p in enumerate(paragraphs)]) or "1. （目前尚無內容）"
+            want_num = target_idx + 1
+            prompt = (
+                "請延續以下故事，補出缺少的下一段，約40字，直接給故事內容，不要加任何說明或標題。\n"
+                f"已完成的段落：\n{context}\n"
+                f"請產生第 {want_num} 段："
+            )
+            resp = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+            )
+            new_para = resp.choices[0].message["content"].strip()
+            while len(paragraphs) < want_num - 1:
+                paragraphs.append("（過渡段落：請之後補充）")
+            paragraphs.append(new_para)
+            story_paragraphs[user_id] = paragraphs
+            story_summaries[user_id] = "\n".join([f"{i+1}. {p}" for i, p in enumerate(paragraphs)])
+            return new_para
+        except Exception as e:
+            print("❌ ensure_paragraph 續寫失敗：", e)
+            return None
+
+    return paragraphs[target_idx]
+
 # ========= 主處理 =========
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -400,6 +495,15 @@ def handle_message(event):
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
+        # 快捷：重設角色（清 seed / 角色卡 / 定妝照）
+        if re.search(r"(重設角色|重置角色|reset character)", user_text):
+            user_character_sheet[user_id] = ""
+            user_fixed_seed[user_id] = random.randint(100000, 999999)
+            user_canonical_image_id[user_id] = None
+            user_canonical_image_url[user_id] = None
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="已重設角色與種子，請描述主角外觀，我來建立定妝照。"))
+            return
+
         if re.search(r"(開始說故事|說故事|講個故事|說一個故事|講一個故事|一起來講故事吧|我們來講故事吧)", user_text):
             reset_story_memory(user_id)
             user_sessions[user_id]["story_mode"] = True
@@ -409,7 +513,7 @@ def handle_message(event):
             return
 
         # 在故事模式下，自動產生第一張主角圖（建立角色設定卡、固定 seed）
-        if user_sessions.get(user_id, {}).get("story_mode", False) and 'reference_image_id' not in user_sessions[user_id]:
+        if user_sessions.get(user_id, {}).get("story_mode", False) and user_canonical_image_id.get(user_id) is None:
             if user_message_counts.get(user_id, 0) >= 3:
                 messages = user_sessions.get(user_id, {}).get("messages", [])
                 summary = generate_story_summary(messages)
@@ -430,6 +534,7 @@ def handle_message(event):
                         if user_id not in user_fixed_seed:
                             user_fixed_seed[user_id] = random.randint(100000, 999999)
 
+                        # 生成第一張，暫作定妝照
                         result = generate_leonardo_image(
                             user_id=user_id,
                             prompt=user_character_sheet[user_id],
@@ -442,10 +547,10 @@ def handle_message(event):
                         if result and result.get("url"):
                             gcs_url = upload_to_gcs_from_url(result["url"], user_id, optimized_prompt)
                             if gcs_url:
-                                user_sessions[user_id]['reference_image_url'] = gcs_url
-                                user_sessions[user_id]['reference_image_id'] = result.get("image_id")
+                                user_canonical_image_id[user_id] = result.get("image_id")
+                                user_canonical_image_url[user_id] = gcs_url
                                 reply_messages = [
-                                    TextSendMessage(text="這是主角的第一張圖："),
+                                    TextSendMessage(text="這是主角的第一張圖（定妝照）："),
                                     ImageSendMessage(original_content_url=gcs_url, preview_image_url=gcs_url),
                                     TextSendMessage(text="喜歡嗎？說「幫我畫第N段故事的圖」可以繼續～")
                                 ]
@@ -458,7 +563,7 @@ def handle_message(event):
                                         save_to_firebase(user_id, "assistant", f"[圖片] {msg.original_content_url}")
                                 return
 
-        # 封面：沿用角色設定卡 + 低強度 img2img + 512×512
+        # 封面：沿用「定妝照」 + 低強度 img2img
         if re.search(r"封面", user_text):
             cover_prompt_raw = user_text.replace("幫我畫封面圖", "").replace("請畫封面", "").replace("畫封面", "").strip()
             story_title = story_titles.get(user_id, "我們的故事")
@@ -468,17 +573,26 @@ def handle_message(event):
             if not optimized_prompt:
                 optimized_prompt = f"storybook cover, watercolor, vibrant, central composition, no text or letters. theme: {story_title}. {cover_prompt_raw}"
 
+            # 若使用者補外觀就更新角色卡並重生定妝照
+            if cover_prompt_raw:
+                augment_character_sheet_from_user(user_id, cover_prompt_raw)
+                regenerate_canonical_portrait(user_id, seed=user_fixed_seed.get(user_id))
+
             base_prefix = user_character_sheet.get(user_id, "")
             final_prompt = (base_prefix + " Cover composition. " + optimized_prompt) if base_prefix else optimized_prompt
 
-            ref_id = user_sessions.get(user_id, {}).get('reference_image_id')
+            # 確保有定妝照
+            ref_id = user_canonical_image_id.get(user_id)
+            if not ref_id:
+                regenerate_canonical_portrait(user_id, seed=user_fixed_seed.get(user_id))
+                ref_id = user_canonical_image_id.get(user_id)
             seed = user_fixed_seed.get(user_id)
 
             result = generate_leonardo_image(
                 user_id=user_id,
                 prompt=final_prompt,
-                reference_image_id=ref_id,   # 用「上一張的 image_id」
-                init_strength=0.25,
+                reference_image_id=ref_id,   # 用定妝照
+                init_strength=0.24,
                 use_enhance=False,
                 seed=seed,
                 width=IMG_W, height=IMG_H
@@ -486,8 +600,6 @@ def handle_message(event):
             if result and result.get("url"):
                 gcs_url = upload_to_gcs_from_url(result["url"], user_id, final_prompt)
                 if gcs_url:
-                    user_sessions[user_id]['reference_image_url'] = gcs_url
-                    user_sessions[user_id]['reference_image_id'] = result.get("image_id")
                     reply_messages = [
                         TextSendMessage(text="這是你的封面："),
                         ImageSendMessage(original_content_url=gcs_url, preview_image_url=gcs_url),
@@ -504,32 +616,33 @@ def handle_message(event):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時畫不出封面，換句話再描述看看 🖍️"))
             return
 
-        # 第 N 段：沿用設定卡 + 低強度 img2img + 固定 seed + 512×512
+        # 第 N 段：沿用設定卡 + 低強度 img2img(定妝照) + 固定 seed
         if re.search(r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)", user_text):
             match = re.search(r"[一二三四五12345]", user_text)
             paragraph_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
             paragraph_num = paragraph_map.get(match.group(0) if match else None, 1) - 1
 
             messages = user_sessions.get(user_id, {}).get("messages", [])
-            summary = generate_story_summary(messages)
-            if summary:
-                story_paragraphs[user_id] = extract_story_paragraphs(summary)
-                story_summaries[user_id] = summary
+            new_summary = generate_story_summary(messages)
+            if new_summary:
+                story_paragraphs[user_id] = extract_story_paragraphs(new_summary)
+                story_summaries[user_id] = new_summary
 
-            if not story_paragraphs.get(user_id) or not (0 <= paragraph_num < len(story_paragraphs[user_id])):
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪還沒有整理好這段故事，請再多說一點細節吧！"))
+            # 用 ensure_paragraph 保證拿到第 N 段
+            story_content = ensure_paragraph(user_id, paragraph_num)
+            if not story_content:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪還沒整理好這段，我們再多描述一點點畫面吧～"))
                 return
 
-            # 取得這段內容
-            story_content = story_paragraphs[user_id][paragraph_num]
+            # 解析這次的額外外觀需求（中文）→ 更新角色卡 → 重生定妝照
             user_extra_desc = re.sub(r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)[，,。.!！]*", "", user_text).strip()
+            if user_extra_desc:
+                augment_character_sheet_from_user(user_id, user_extra_desc)
+                regenerate_canonical_portrait(user_id, seed=user_fixed_seed.get(user_id))
 
-            # >>>>>>> 這裡是「確保 seed / 角色卡」的保險碼 <<<<<<<
-            # 確保 seed
+            # 確保 seed & 角色卡
             if user_id not in user_fixed_seed:
                 user_fixed_seed[user_id] = random.randint(100000, 999999)
-
-            # 確保角色設定卡（若使用者一開始就從第 N 段開局）
             if not user_character_sheet.get(user_id):
                 seed_prompt = optimize_image_prompt(story_content, "watercolor, children picture book style")
                 user_character_sheet[user_id] = (
@@ -538,26 +651,26 @@ def handle_message(event):
                     "Watercolor children picture-book style. "
                     + (seed_prompt or "")
                 )
-            # >>>>>>> 保險碼結束 <<<<<<<
 
-            # 正常優化本段 prompt
+            # 優化本段 prompt，並加角色卡前綴
             optimized_prompt = optimize_image_prompt(story_content, user_extra_desc or "watercolor children picture book style")
             if not optimized_prompt:
                 optimized_prompt = f"A soft watercolor picture book illustration for children, no text or letters. Story: {story_content} {user_extra_desc}"
-
-            # 加上角色設定卡前綴
             base_prefix = user_character_sheet.get(user_id, "")
             final_prompt = (base_prefix + " Scene description: " + optimized_prompt) if base_prefix else optimized_prompt
 
-            # 參考圖 ID + 固定 seed
-            ref_id = user_sessions.get(user_id, {}).get('reference_image_id')
+            # 以定妝照為唯一參考
+            ref_id = user_canonical_image_id.get(user_id)
+            if not ref_id:
+                regenerate_canonical_portrait(user_id, seed=user_fixed_seed.get(user_id))
+                ref_id = user_canonical_image_id.get(user_id)
             seed = user_fixed_seed.get(user_id)
 
             result = generate_leonardo_image(
                 user_id=user_id,
                 prompt=final_prompt,
                 reference_image_id=ref_id,
-                init_strength=0.25,     # 20–35%
+                init_strength=0.24,     # 0.22~0.30 建議
                 use_enhance=False,
                 seed=seed,
                 width=IMG_W, height=IMG_H
@@ -565,9 +678,6 @@ def handle_message(event):
             if result and result.get("url"):
                 gcs_url = upload_to_gcs_from_url(result["url"], user_id, final_prompt)
                 if gcs_url:
-                    # 以最新一張作為下一張的參考
-                    user_sessions[user_id]['reference_image_url'] = gcs_url
-                    user_sessions[user_id]['reference_image_id'] = result.get("image_id")
                     reply_messages = [
                         TextSendMessage(text=f"這是第 {paragraph_num + 1} 段故事的插圖："),
                         ImageSendMessage(original_content_url=gcs_url, preview_image_url=gcs_url)
