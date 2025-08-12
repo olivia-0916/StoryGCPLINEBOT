@@ -63,7 +63,7 @@ user_character_sheet = {}   # 角色設定卡（前綴）
 
 # ========= 常數 =========
 LEO_BASE = "https://cloud.leonardo.ai/api/rest/v1"
-LUCID_ORIGIN_ID = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"
+LUCID_ORIGIN_ID = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"  # Lucid Origin（依官方文件而定）
 IMG_W = 512
 IMG_H = 512
 
