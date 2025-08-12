@@ -1,5 +1,5 @@
 # app.py
-import os, sys, json, time, uuid, re, random, traceback
+import os, sys, json, time, uuid, re, random, traceback, tempfile, gc
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -37,7 +37,7 @@ gcs_client = gcs_storage.Client()
 gcs_bucket = gcs_client.bucket(GCS_BUCKET)
 
 # Leonardo
-LEO_BASE = "https://cloud.leonardo.ai/api/rest/v1"
+LEO_BASE  = "https://cloud.leonardo.ai/api/rest/v1"
 LEO_MODEL = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"  # Lucid Origin
 IMG_W = 512
 IMG_H = 512
@@ -45,13 +45,13 @@ IMG_H = 512
 # ----------------------------
 # 會話狀態
 # ----------------------------
-user_sessions = {}            # {user_id: {...}}
-user_fixed_seed = {}          # 固定 seed
-user_character_sheet = {}     # 主角設定卡（文字前綴）
-user_definitive_imgid = {}    # 定妝照 image_id
-user_definitive_url = {}      # 定妝照 url
-user_world_state = {}         # 世界觀（setting/time/mood/palette）
-user_scene_briefs = {}        # 每段場景摘要
+user_sessions         = {}  # {user_id: {"messages":[...], "story_mode":True, "summary":str}}
+user_fixed_seed       = {}
+user_character_sheet  = {}
+user_definitive_imgid = {}
+user_definitive_url   = {}
+user_world_state      = {}
+user_scene_briefs     = {}
 
 # 預設世界觀 + 安全存取
 DEFAULT_WORLD = {
@@ -64,7 +64,7 @@ def get_world(user_id):
     return user_world_state.setdefault(user_id, DEFAULT_WORLD.copy())
 
 # ----------------------------
-# OpenAI 簡易呼叫
+# OpenAI 呼叫
 # ----------------------------
 def _chat(messages, temperature=0.6):
     try:
@@ -92,21 +92,37 @@ def save_chat(user_id, role, text):
         print("⚠️ Firebase save_chat failed:", e)
 
 def upload_to_gcs_from_url(url, user_id, prompt):
+    """串流下載 → 暫存檔 → 上傳 GCS，省記憶體"""
+    tmp_path = None
     try:
-        r = requests.get(url)
-        r.raise_for_status()
-        fname = f"{user_id}_{uuid.uuid4().hex}.png"
-        blob = gcs_bucket.blob(fname)
-        blob.upload_from_string(r.content, content_type="image/png")
-        gcs_url = f"https://storage.googleapis.com/{GCS_BUCKET}/{fname}"
+        with requests.get(url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            fd, tmp_path = tempfile.mkstemp(prefix="img_", suffix=".png", dir="/tmp")
+            with os.fdopen(fd, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 64):
+                    if chunk:
+                        f.write(chunk)
+
+        filename = f"{user_id}_{uuid.uuid4().hex}.png"
+        blob = gcs_bucket.blob(filename)
+        blob.upload_from_filename(tmp_path, content_type="image/png")
+
+        gcs_url = f"https://storage.googleapis.com/{GCS_BUCKET}/{filename}"
         db.collection("users").document(user_id).collection("images").add({
-            "url": gcs_url, "prompt": prompt, "timestamp": firestore.SERVER_TIMESTAMP
+            "url": gcs_url, "prompt": (prompt or "")[:1500], "timestamp": firestore.SERVER_TIMESTAMP
         })
         print("✅ 圖片已上傳至 GCS 並儲存：", gcs_url)
         return gcs_url
     except Exception as e:
-        print("❌ GCS upload failed:", e)
+        print("❌ GCS upload (stream) failed:", e)
         return None
+    finally:
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        gc.collect()
 
 # ----------------------------
 # 故事整理（較長 & 帶元素）
@@ -139,7 +155,6 @@ def build_scene_brief(paragraph, world_hint=None):
     res = _chat([{"role":"system","content":sysmsg},{"role":"user","content":user}], temperature=0.2)
     try:
         data = json.loads(res)
-        # 填補缺省
         def _fallback(key, default):
             return data.get(key) or (world_hint or {}).get(key) or default
         return {
@@ -210,7 +225,7 @@ def leonardo_headers():
 
 def leonardo_tti(payload):
     url = f"{LEO_BASE}/generations"
-    r = requests.post(url, headers=leonardo_headers(), json=payload, timeout=45)
+    r = requests.post(url, headers=leonardo_headers(), json=payload, timeout=60)
     if not r.ok:
         print("❌ Leonardo POST 失敗:", r.status_code, r.text)
     r.raise_for_status()
@@ -235,7 +250,7 @@ def leonardo_poll(gen_id, timeout=120):
 def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_image_id=None, init_strength=None):
     payload = {
         "modelId": LEO_MODEL,
-        "prompt": prompt[:1500],    # 安全長度
+        "prompt": prompt[:1500],
         "num_images": 1,
         "width": IMG_W, "height": IMG_H,
         "contrast": 3.0,
@@ -247,7 +262,7 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
     if init_image_id and init_strength:
         payload["isInitImage"] = True
         payload["init_generation_image_id"] = init_image_id
-        payload["init_strength"] = float(init_strength)   # ✅ 正確 key
+        payload["init_strength"] = float(init_strength)  # ✅ 正確欄位
 
     print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
     try:
@@ -268,18 +283,30 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
     return None
 
 # ----------------------------
-# 引導系統提示
+# 引導系統提示（維持「不主動總結」）
 # ----------------------------
 base_system_prompt = (
     "你是「小繪」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助長輩創作 5 段故事繪本。\n"
     "請用簡潔、好讀的語氣回應；每則訊息盡量不超過 35 字並適當分段。\n"
-    "第一階段：依「如果我有一個超能力」主題，循序引導主角/地點/事件/解法。\n"
+    "第一階段：以提問引導補齊人事時地物與情緒/動作，不要自行總結整個故事。\n"
+    "只有在使用者主動說「整理/總結/summary」或要求繪圖且無段落摘要時，才產生摘要。\n"
     "第二階段：協助描述每段畫面（不要把文字畫在圖上）。\n"
     "請自稱「小繪」。"
 )
 
 def format_reply(text):
     return re.sub(r'([。！？])\s*', r'\1\n', text)
+
+# 產生引導式追問（不自動總結）
+def guidance_reply():
+    hints = [
+        "主角叫什麼？幾歲？外型？",
+        "故事在哪裡、什麼時間？",
+        "這段要發生什麼事？",
+        "有誰在場？主角做了什麼？",
+        "表情/情緒與重要物件是？"
+    ]
+    return "我們一步步來～\n" + "\n".join("• " + h for h in hints[:3])
 
 # ----------------------------
 # Flask 路由
@@ -305,7 +332,7 @@ def callback():
 # 狀態工具
 # ----------------------------
 def reset_session(user_id):
-    user_sessions[user_id] = {"messages": [], "story_mode": True}
+    user_sessions[user_id] = {"messages": [], "story_mode": True, "summary": ""}
     user_fixed_seed[user_id] = random.randint(100000, 999999)
     user_world_state[user_id] = DEFAULT_WORLD.copy()
     user_scene_briefs[user_id] = []
@@ -325,32 +352,36 @@ def handle_message(event):
         # 啟動
         if re.search(r"(開始說故事|說故事|講個故事|一起來講故事吧|我們來講故事吧)", user_text):
             reset_session(user_id)
-            line_bot_api.reply_message(reply_token, TextSendMessage("太好了，我們開始吧！主角是誰？在哪裡？"))
+            line_bot_api.reply_message(reply_token, TextSendMessage("太好了！先說主角與地點吧？"))
             return
 
-        # 累積對話
-        sess = user_sessions.setdefault(user_id, {"messages": [], "story_mode": True})
+        # 累積對話（並裁切上限）
+        sess = user_sessions.setdefault(user_id, {"messages": [], "story_mode": True, "summary": ""})
         sess["messages"].append({"role":"user","content":user_text})
+        if len(sess["messages"]) > 60:
+            sess["messages"] = sess["messages"][-60:]
         save_chat(user_id, "user", user_text)
 
         # 使用者指定主角裝扮（更新設定卡）
         if re.search(r"(穿|戴|頭上|衣|裙|襯衫|鞋|配件)", user_text):
-            addon = re.sub(r"^[^，。]*?(穿|戴)", "wears ", user_text)
+            # 簡易抽取：取出「穿/戴」之後的片語
+            m = re.search(r"(穿|戴)(.+)", user_text)
+            wear_txt = m.group(2).strip() if m else user_text
             user_character_sheet[user_id] = (
                 "Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
                 "Whimsical watercolor storybook style. Primary ethnicity: East Asian features; black hair, dark brown eyes, warm fair skin. "
-                f"Main character always wears/has: {addon}. Only the main character has these signature items."
+                f"Main character always wears/has: {wear_txt}. Only the main character has these signature items."
             )
             print("✨ 角色設定卡已更新:", user_character_sheet[user_id])
 
-        # 整理 / 總結故事
+        # ====== 整理 / 總結（僅在使用者要求時）======
         if re.search(r"(整理|總結|summary)", user_text):
             full = [{"role":"system","content":base_system_prompt}] + sess["messages"][-40:]
             summary = generate_story_summary(full)
             sess["summary"] = summary
             paras = extract_paragraphs(summary)
 
-            world = get_world(user_id)   # 🔧 一定有值
+            world = get_world(user_id)
             briefs = []
             for p in paras:
                 b = build_scene_brief(p, world)
@@ -364,7 +395,7 @@ def handle_message(event):
                 }
             user_scene_briefs[user_id] = briefs
 
-            # 回覆較長的整理
+            # 回覆較長整理
             pretty = []
             for i, p in enumerate(paras, 1):
                 b = briefs[i-1]
@@ -373,13 +404,13 @@ def handle_message(event):
                     f"   場景：{b['setting']}｜時間：{b['time_of_day']}｜氛圍：{b['mood']}\n"
                     f"   重點：主角動作 {b['main_action']}；互動 {b['interaction']}；物件 {b['key_objects'] or '—'}"
                 )
-            text_reply = "\n\n".join(pretty)
+            text_reply = "\n\n".join(pretty) if pretty else "目前資訊太少，再多提供一點內容吧～"
             line_bot_api.reply_message(reply_token, TextSendMessage(text_reply))
             save_chat(user_id, "assistant", text_reply)
             return
 
-        # 生成第一張定妝照（若尚未有）或用「第一段」觸發
-        if "定妝" in user_text or (user_definitive_imgid.get(user_id) is None and re.search(r"第一段", user_text)):
+        # ====== 生成「定妝照」：只在你說「定妝」時觸發（不再因為看到『第一段』就觸發）======
+        if "定妝" in user_text:
             if user_character_sheet.get(user_id) is None:
                 user_character_sheet[user_id] = (
                     "Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
@@ -403,13 +434,14 @@ def handle_message(event):
                 save_chat(user_id, "assistant", f"[image]{result['url']}")
                 return
 
-        # 畫第 N 段故事
-        if re.search(r"第[一二三四五12345]段", user_text):
+        # ====== 畫第 N 段故事：必要時才臨時總結一次 ======
+        draw_pat = r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)"
+        if re.search(draw_pat, user_text):
             m = re.search(r"[一二三四五12345]", user_text)
             idx_map = {'一':1,'二':2,'三':3,'四':4,'五':5,'1':1,'2':2,'3':3,'4':4,'5':5}
             n = idx_map.get(m.group(0),1) - 1
 
-            # 若還沒有摘要/briefs → 先整理一次
+            # 若尚未有摘要/briefs → 臨時整理一次（僅用於繪圖）
             if not user_scene_briefs.get(user_id):
                 full = [{"role":"system","content":base_system_prompt}] + sess["messages"][-40:]
                 summary = generate_story_summary(full)
@@ -425,7 +457,7 @@ def handle_message(event):
                 return
 
             scene = briefs[n]
-            extra = re.sub(r".*段故事的圖", "", user_text).strip(" ，,。.!！")
+            extra = re.sub(draw_pat, "", user_text).strip(" ，,。.!！")
             prompt, neg = build_image_prompt(user_id, scene, extra)
 
             ref_id = user_definitive_imgid.get(user_id)
@@ -445,16 +477,23 @@ def handle_message(event):
                 save_chat(user_id,"assistant",f"[image]{result['url']}")
                 return
             else:
-                line_bot_api.reply_message(reply_token, TextSendMessage("這段畫不出來，我再微調一下，你可再描述多一點動作或情緒嗎？"))
+                line_bot_api.reply_message(reply_token, TextSendMessage("這段畫不出來，再多描述一下動作/情緒與場景吧～"))
                 return
 
-        # 一般對話 → 繼續引導創作
+        # ====== 一般對話：維持引導，不主動總結 ======
         sysmsg = base_system_prompt
+        # 附帶目前摘要可讓語境延續，但不會主動再生新的摘要
         summary = user_sessions[user_id].get("summary","")
         if summary:
-            sysmsg += f"\n【故事摘要】\n{summary}\n請延續互動。"
+            sysmsg += f"\n【故事摘要】\n{summary}\n請延續互動（仍以提問引導，不要重整 5 段）。"
         msgs = [{"role":"system","content":sysmsg}] + sess["messages"][-20:]
-        reply = _chat(msgs, temperature=0.7) or "好喔，我們繼續～"
+        reply = _chat(msgs, temperature=0.7)
+        if not reply:
+            reply = guidance_reply()
+        else:
+            # 若模型回太散，補一段引導
+            reply += "\n\n" + guidance_reply()
+        # 控制斷行
         reply = format_reply(reply)
         line_bot_api.reply_message(reply_token, TextSendMessage(reply))
         save_chat(user_id, "assistant", reply)
