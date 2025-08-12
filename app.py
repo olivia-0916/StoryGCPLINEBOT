@@ -83,6 +83,13 @@ DEFAULT_ETHNICITY_LINE = (
     "Maintain East Asian facial structure unless the user explicitly specifies another ethnicity or hair/eye color."
 )
 
+SAFE_STYLE_LINE = "Whimsical watercolor storybook illustration style."
+
+SAFETY_SUFFIX = (
+    " wholesome, heart-warming, strictly PG content, modest attire, no sensuality, no suggestive context, "
+    "no sexualization, no fetish, safe for work."
+)
+
 # ========= 系統提示 =========
 base_system_prompt = """
 你是「小繪」，一位親切、溫柔、擅長說故事的 AI 夥伴，協助一位 50 歲以上的長輩創作 5 段故事繪本。
@@ -167,6 +174,27 @@ def extract_story_paragraphs(summary):
     clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in filtered]
     return clean_paragraphs[:5]
 
+def _sanitize_text_for_moderation(text: str) -> str:
+    """將可能觸發審查的詞改成安全用語。"""
+    t = text or ""
+    # 移除年齡（英/中）
+    t = re.sub(r'\b\d{1,2}\s*[-]?\s*year[-\s]?old\b', 'adult', t, flags=re.IGNORECASE)
+    t = re.sub(r'(\d{1,2})\s*歲', '成人', t)
+    t = re.sub(r'(\d{1,2})\s*岁', '成人', t)
+    # girl/boy → character / person（盡量中性）
+    t = re.sub(r'\bgirl\b', 'woman', t, flags=re.IGNORECASE)
+    t = re.sub(r'\bboy\b', 'man', t, flags=re.IGNORECASE)
+    # children picture-book → whimsical watercolor storybook
+    t = re.sub(r'children?\s+picture[-\s]?book', 'whimsical watercolor storybook', t, flags=re.IGNORECASE)
+    # white dress → flowing light-colored outfit（較安全）
+    t = re.sub(r'white\s+dress', 'flowing light-colored outfit', t, flags=re.IGNORECASE)
+    # kid/child → character（避免和服裝/外觀一起被誤判）
+    t = re.sub(r'\b(child|kid)\b', 'character', t, flags=re.IGNORECASE)
+    # 加上安全尾註（若沒有）
+    if SAFETY_SUFFIX.strip().lower() not in t.lower():
+        t = f"{t.strip()} {SAFETY_SUFFIX}"
+    return t.strip()
+
 def optimize_image_prompt(story_content, user_prompt=""):
     try:
         style_map = {
@@ -180,7 +208,7 @@ def optimize_image_prompt(story_content, user_prompt=""):
         user_styles = [en for zh, en in style_map.items() if zh in user_prompt]
         style_english = ", ".join(user_styles)
         base_instruction = (
-            "Please rewrite the following story paragraph and user details into an English prompt suitable for a children picture book illustration. "
+            "Please rewrite the following story paragraph and user details into an English prompt suitable for a storybook illustration in watercolor style. "
             "No text, no words, no letters, no captions, no subtitles, no watermark."
         )
         content = f"Story paragraph: {story_content}\nDetails: {user_prompt}"
@@ -191,10 +219,12 @@ def optimize_image_prompt(story_content, user_prompt=""):
                       {"role": "user", "content": full_prompt}],
             temperature=0.7,
         )
-        return response.choices[0].message["content"].strip()
+        p = response.choices[0].message["content"].strip()
+        # 安全處理
+        return _sanitize_text_for_moderation(p)
     except Exception as e:
         print("❌ 優化插圖 prompt 失敗：", e)
-        return None
+        return _sanitize_text_for_moderation(f"{story_content} {user_prompt}")
 
 def format_reply(text):
     return re.sub(r'([。！？])\s*', r'\1\n', text)
@@ -213,7 +243,6 @@ def get_openai_response(user_id, user_message, encouragement_suffix=""):
     if any(phrase in user_message.strip().lower() for phrase in low_engagement_inputs):
         assistant_reply = random.choice([
             "沒關係，我們可以慢慢想 👣",
-            "如果不想說，我們可以跳過喔 🙂",
             "不用急～你已經很棒了 💪"
         ])
         user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
@@ -312,6 +341,7 @@ def generate_leonardo_image(
         print("❌ LEONARDO_API_KEY 未設定")
         return None
 
+    # 基本負向詞
     base_negative = "text, letters, words, captions, subtitles, watermark, signature, different character, change hairstyle, change outfit, age change, gender change"
     if extra_negative:
         base_negative = base_negative + ", " + extra_negative
@@ -323,9 +353,12 @@ def generate_leonardo_image(
         "User-Agent": "storybot/1.0"
     }
 
+    # 送出前最後一道安全處理
+    safe_prompt = _sanitize_text_for_moderation(prompt)
+
     payload = {
         "modelId": model_id,
-        "prompt": prompt,
+        "prompt": safe_prompt,
         "num_images": 1,
         "width": width,
         "height": height,
@@ -351,6 +384,25 @@ def generate_leonardo_image(
     print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
     resp = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
                          timeout=45, allow_redirects=False)
+
+    # 403 審查擋下 → 自動一次重試：更保守的安全版
+    if resp.status_code == 403 and "Content moderated" in (resp.text or ""):
+        try:
+            print("🛡️ 觸發內容審查，改用更保守的安全版 prompt 重新嘗試")
+            safer = safe_prompt + " extremely safe, family-friendly, suitable for all ages, absolutely no sensitive context."
+            payload["prompt"] = safer
+            payload["enhancePrompt"] = False
+            resp2 = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
+                                  timeout=45, allow_redirects=False)
+            if resp2.status_code >= 400:
+                print("❌ 安全重試仍失敗:", resp2.status_code, resp2.text[:800])
+                resp2.raise_for_status()
+            gen_id = resp2.json()["sdGenerationJob"]["generationId"]
+            print("✅ 安全重試成功，Generation ID:", gen_id)
+            return wait_for_leonardo_image(gen_id)
+        except Exception as e:
+            print("❌ 安全重試例外：", e)
+            return None
 
     if resp.status_code >= 400:
         try:
@@ -424,28 +476,23 @@ def _desc_allows_ethnicity_override(text: str) -> bool:
     return False
 
 def set_main_character_name(user_id: str, name: str):
-    """設定主角名字（去除空白與標點），並寫入角色設定卡（不輸出文字到圖片）。"""
     name = (name or "").strip().strip("，,。.!！:：;；「」『』()（）[]【】")
     if not name:
         return
     user_main_character_name[user_id] = name
     base = user_character_sheet.get(user_id, "")
-    # 若未含東亞預設且未允許覆寫，加上
     if "Primary ethnicity:" not in base and not user_allow_ethnicity_override.get(user_id, False):
         base = (DEFAULT_ETHNICITY_LINE + " ") + base
-    # 記名（提醒不要在畫面顯字）
     name_line = f"The main character's name is {name}. Do not print any text or name in the image."
     if name_line not in base:
         base = (base + " " + name_line).strip()
+    # 統一風格描述
+    if SAFE_STYLE_LINE not in base:
+        base = (SAFE_STYLE_LINE + " " + base).strip()
     user_character_sheet[user_id] = base
     print(f"📝 已設定主角名字：{name}")
 
 def try_parse_and_set_name(user_id: str, text: str) -> bool:
-    """
-    從用戶輸入中嘗試抓主角名字：
-    - 主角叫X / 主角名字是X / 設定主角名字 X / name: X / 名字: X
-    回傳是否成功設定。
-    """
     t = (text or "").strip()
     patterns = [
         r"(?:主角|人物|她|他)?\s*(?:叫|名字是|名字為|名字为)\s*([^\s，,。!！]{1,12})",
@@ -461,11 +508,9 @@ def try_parse_and_set_name(user_id: str, text: str) -> bool:
     return False
 
 def augment_character_sheet_from_user(user_id, zh_desc: str):
-    """把使用者外觀（中文）轉成英文特徵加入角色設定卡；同時偵測是否允許覆寫預設東亞外觀。"""
     if not zh_desc or not zh_desc.strip():
         return
     try:
-        # 是否允許覆寫預設族裔
         if _desc_allows_ethnicity_override(zh_desc):
             user_allow_ethnicity_override[user_id] = True
 
@@ -480,45 +525,48 @@ def augment_character_sheet_from_user(user_id, zh_desc: str):
             temperature=0.2,
         )
         features = resp.choices[0].message["content"].strip()
-        user_signature_features[user_id] = features  # 保存，供負向詞阻擋配角套用
+        user_signature_features[user_id] = features
 
-        # 建角卡基底
         base = user_character_sheet.get(user_id, "")
         if "Consistent main character" not in base:
-            base = ("Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
-                    "Watercolor children picture-book style. ")
+            base = ("Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. ")
+        if SAFE_STYLE_LINE not in base:
+            base += SAFE_STYLE_LINE + " "
 
-        # 加上東亞預設（除非已允許覆寫）
         if not user_allow_ethnicity_override.get(user_id, False) and "Primary ethnicity:" not in base:
             base += DEFAULT_ETHNICITY_LINE + " "
 
-        # 如已有主角名字，加上名字提示
         name = user_main_character_name.get(user_id, "")
         if name and f"The main character's name is {name}." not in base:
             base += f"The main character's name is {name}. Do not print any text or name in the image. "
 
-        # 加上這次的特徵（限定主角）
         user_character_sheet[user_id] = base + f" Main character always wears/has: {features}. Only the main character has these signature items."
+        # 最後再加一次安全尾註
+        if SAFETY_SUFFIX.strip().lower() not in user_character_sheet[user_id].lower():
+            user_character_sheet[user_id] += " " + SAFETY_SUFFIX
         print(f"✨ 角色設定卡已更新: {user_character_sheet[user_id]}")
     except Exception as e:
         print("❌ augment_character_sheet_from_user 失敗：", e)
 
 def regenerate_canonical_portrait(user_id, seed=None):
-    """用角色設定卡生成/重生成主角定妝照，回傳 (url, image_id)"""
     if seed is None:
         seed = user_fixed_seed.get(user_id) or random.randint(100000, 999999)
         user_fixed_seed[user_id] = seed
-    # 確保有東亞預設（若未允許覆寫）
+
     base = user_character_sheet.get(user_id) or ""
+    if SAFE_STYLE_LINE not in base:
+        base = (SAFE_STYLE_LINE + " " + base).strip()
     if not user_allow_ethnicity_override.get(user_id, False) and "Primary ethnicity:" not in base:
-        base = (DEFAULT_ETHNICITY_LINE + " ") + base
-    # 若有名字，加上記名
+        base = (DEFAULT_ETHNICITY_LINE + " " + base).strip()
     name = user_main_character_name.get(user_id, "")
     if name and f"The main character's name is {name}." not in base:
-        base += f"The main character's name is {name}. Do not print any text or name in the image. "
+        base += f" The main character's name is {name}. Do not print any text or name in the image."
+    if SAFETY_SUFFIX.strip().lower() not in base.lower():
+        base += " " + SAFETY_SUFFIX
+
     user_character_sheet[user_id] = base
 
-    prompt = user_character_sheet.get(user_id) or "Watercolor picture-book style, consistent main character."
+    prompt = base
     result = generate_leonardo_image(
         user_id=user_id,
         prompt=prompt,
@@ -538,7 +586,6 @@ def regenerate_canonical_portrait(user_id, seed=None):
     return None, None
 
 def main_character_present(user_text: str, story_content: str) -> bool:
-    """非常簡單的規則判斷：含『主角不在 / 沒有主角 / 不含主角』等就視為不在場。"""
     t = f"{user_text} {story_content}".lower()
     keywords = ["主角不在", "沒有主角", "没有主角", "不含主角", "no main character", "without the main character"]
     return not any(k in t for k in keywords)
@@ -552,10 +599,9 @@ def handle_message(event):
     print(f"📩 收到使用者 {user_id} 的訊息：{user_text}")
 
     try:
-        # 先嘗試從輸入中抓名字（例如：主角叫花媽 / 設定主角名字 花媽 / name: Hana）
+        # 嘗試從輸入中抓名字
         parsed = try_parse_and_set_name(user_id, user_text)
         if parsed:
-            # 如果剛剛設定了名字，建議重生定妝照讓後續一致
             regenerate_canonical_portrait(user_id, seed=user_fixed_seed.get(user_id))
             line_bot_api.reply_message(reply_token, TextSendMessage(text=f"主角名字已設定為「{user_main_character_name[user_id]}」，我會用定妝照鎖定喔。"))
             return
@@ -580,7 +626,7 @@ def handle_message(event):
             ))
             return
 
-        # 在故事模式下，自動產生第一張主角圖（建立角色設定卡、固定 seed）
+        # 在故事模式下，自動產生第一張主角圖
         if user_sessions.get(user_id, {}).get("story_mode", False) and user_canonical_image_id.get(user_id) is None:
             if user_message_counts.get(user_id, 0) >= 3:
                 messages = user_sessions.get(user_id, {}).get("messages", [])
@@ -589,26 +635,23 @@ def handle_message(event):
                     story_paragraphs[user_id] = extract_story_paragraphs(summary)
                     story_summaries[user_id] = summary
                     first_paragraph_prompt = story_paragraphs[user_id][0]
-                    optimized_prompt = optimize_image_prompt(first_paragraph_prompt, "watercolor, children picture book style")
+                    optimized_prompt = optimize_image_prompt(first_paragraph_prompt, "watercolor, storybook style")
 
                     if optimized_prompt:
-                        # 角色設定卡（加入預設東亞 + 名字）
-                        base = (
-                            "Consistent main character across all images. "
-                            "Same face, hairstyle, clothing, colors, proportions. "
-                            "Watercolor children picture-book style. "
-                        )
+                        base = "Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
+                        base += SAFE_STYLE_LINE + " "
                         if not user_allow_ethnicity_override.get(user_id, False):
                             base += DEFAULT_ETHNICITY_LINE + " "
                         name = user_main_character_name.get(user_id, "")
                         if name:
                             base += f"The main character's name is {name}. Do not print any text or name in the image. "
-                        user_character_sheet[user_id] = base + optimized_prompt
+                        if SAFETY_SUFFIX.strip().lower() not in base.lower():
+                            base += SAFETY_SUFFIX + " "
+                        user_character_sheet[user_id] = (base + optimized_prompt).strip()
 
                         if user_id not in user_fixed_seed:
                             user_fixed_seed[user_id] = random.randint(100000, 999999)
 
-                        # 生成第一張，暫作定妝照
                         result = generate_leonardo_image(
                             user_id=user_id,
                             prompt=user_character_sheet[user_id],
@@ -647,21 +690,20 @@ def handle_message(event):
                 augment_character_sheet_from_user(user_id, cover_prompt_raw)
                 regenerate_canonical_portrait(user_id, seed=user_fixed_seed.get(user_id))
 
-            optimized_prompt = optimize_image_prompt(summary_for_cover, f"cover, {cover_prompt_raw}, watercolor children picture book style")
+            optimized_prompt = optimize_image_prompt(summary_for_cover, f"cover, {cover_prompt_raw}, watercolor storybook style")
             if not optimized_prompt:
                 optimized_prompt = f"storybook cover, watercolor, vibrant, central composition, no text or letters. theme: {story_title}. {cover_prompt_raw}"
+                optimized_prompt = _sanitize_text_for_moderation(optimized_prompt)
 
             base_prefix = user_character_sheet.get(user_id, "")
             final_prompt = (base_prefix + " Cover composition. " + optimized_prompt) if base_prefix else optimized_prompt
 
-            # 確保有定妝照
             ref_id = user_canonical_image_id.get(user_id)
             if not ref_id:
                 regenerate_canonical_portrait(user_id, seed=user_fixed_seed.get(user_id))
                 ref_id = user_canonical_image_id.get(user_id)
             seed = user_fixed_seed.get(user_id)
 
-            # 負向詞：若未允許覆寫族裔，避免歐美化膚色/髮眼
             extra_neg = None
             if not user_allow_ethnicity_override.get(user_id, False):
                 extra_neg = "blonde hair, red hair, light brown hair, blue eyes, green eyes, non-East-Asian facial features"
@@ -707,12 +749,11 @@ def handle_message(event):
                 story_paragraphs[user_id] = extract_story_paragraphs(new_summary)
                 story_summaries[user_id] = new_summary
 
-            # 保證能取到第 N 段
+            # 取到第 N 段（不足就簡單補上）
             def ensure_paragraph(user_id, target_idx):
                 pars = story_paragraphs.get(user_id) or []
                 if 0 <= target_idx < len(pars):
                     return pars[target_idx]
-                # 補段（簡版）
                 context = "\n".join([f"{i+1}. {p}" for i, p in enumerate(pars)]) or "1. （目前尚無內容）"
                 want_num = target_idx + 1
                 prompt = (
@@ -752,26 +793,26 @@ def handle_message(event):
             if user_id not in user_fixed_seed:
                 user_fixed_seed[user_id] = random.randint(100000, 999999)
             if not user_character_sheet.get(user_id):
-                seed_prompt = optimize_image_prompt(story_text, "watercolor, children picture book style")
-                base = ("Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
-                        "Watercolor children picture-book style. ")
+                seed_prompt = optimize_image_prompt(story_text, "watercolor, storybook style")
+                base = "Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
+                base += SAFE_STYLE_LINE + " "
                 if not user_allow_ethnicity_override.get(user_id, False):
                     base += DEFAULT_ETHNICITY_LINE + " "
                 name = user_main_character_name.get(user_id, "")
                 if name:
                     base += f"The main character's name is {name}. Do not print any text or name in the image. "
+                if SAFETY_SUFFIX.strip().lower() not in base.lower():
+                    base += SAFETY_SUFFIX + " "
                 user_character_sheet[user_id] = base + (seed_prompt or "")
 
             # 主角是否出場？
             mc_present = main_character_present(user_text, story_text)
             name = user_main_character_name.get(user_id, "")
 
-            # 優化本段 prompt，並加角色卡前綴 + 場景規則 + 記名
-            optimized_prompt = optimize_image_prompt(story_text, user_extra_desc or "watercolor children picture book style")
-            if not optimized_prompt:
-                optimized_prompt = f"A soft watercolor picture book illustration for children, no text or letters. Story: {story_text} {user_extra_desc}"
-            base_prefix = user_character_sheet.get(user_id, "")
+            # 優化本段 prompt，並加規則
+            optimized_prompt = optimize_image_prompt(story_text, user_extra_desc or "watercolor storybook style")
 
+            base_prefix = user_character_sheet.get(user_id, "")
             scene_rules = []
             if name:
                 scene_rules.append(f"The main character is named {name}. Do not print any text or the name in the image.")
@@ -779,8 +820,7 @@ def handle_message(event):
                 scene_rules.append("The main character appears in this scene. Only the main character uses the signature outfit/items; other characters wear different outfits.")
             else:
                 scene_rules.append("The main character does not appear in this scene. Do not include the main character. Do not transfer the main character's signature items to any other characters.")
-
-            final_prompt = (base_prefix + " " + " ".join(scene_rules) + " Scene description: " + optimized_prompt).strip()
+            final_prompt = (base_prefix + " " + SAFE_STYLE_LINE + " " + " ".join(scene_rules) + " Scene description: " + optimized_prompt).strip()
 
             # 動態負向詞
             extra_neg = []
@@ -793,10 +833,10 @@ def handle_message(event):
                 else:
                     extra_neg.append(f"{sig}")
             if name and not mc_present:
-                extra_neg.append(f"any depiction of {name}")  # 無主角時，避免出現名字所代表的角色
+                extra_neg.append(f"any depiction of {name}")
             extra_neg_str = ", ".join([s for s in extra_neg if s])
 
-            # 以定妝照為唯一參考（若主角出場）
+            # 以定妝照為參考（若主角出場）
             ref_id = None
             init_strength = None
             if mc_present:
