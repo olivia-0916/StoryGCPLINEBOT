@@ -310,27 +310,64 @@ def generate_leonardo_image(
         "enhancePrompt": bool(use_enhance),
         "negative_prompt": "text, letters, words, captions, subtitles, watermark, signature, different character, change hairstyle, change outfit, age change, gender change"
     }
-
     if seed is not None:
         payload["seed"] = int(seed)
 
-    # 正確 img2img：帶 image_id + isInitImage + initStrength（駝峰）
-    if reference_image_id and init_strength is not None:
+    # 驗證 ref id（必須像 UUID），否則視為無效
+    def _is_valid_uuid(s: str) -> bool:
+        import re as _re
+        return bool(_re.match(r"^[0-9a-fA-F-]{36}$", s or ""))
+
+    use_img2img = bool(reference_image_id and init_strength is not None and _is_valid_uuid(reference_image_id))
+    if use_img2img:
         payload["isInitImage"] = True
         payload["init_generation_image_id"] = reference_image_id
         payload["initStrength"] = float(init_strength)
-        payload["enhancePrompt"] = False  # 降低漂移
+        payload["enhancePrompt"] = False  # 降漂移
 
     print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
     resp = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
                          timeout=45, allow_redirects=False)
+
     if resp.status_code >= 400:
-        print("❌ Leonardo POST 失敗:", resp.status_code, resp.text[:600])
-        resp.raise_for_status()
+        # 印出完整錯誤，利於定位
+        try:
+            print("❌ Leonardo POST 失敗:", resp.status_code, resp.text[:800])
+        except Exception:
+            pass
+
+        # 若是 img2img 觸發的 400，降級重試一次：改走 text-to-image
+        if use_img2img:
+            print("↩️ 自動降級：改用 text-to-image 重試（保留 seed 與 prompt）")
+            try:
+                # 移除 img2img 相關欄位
+                payload.pop("isInitImage", None)
+                payload.pop("init_generation_image_id", None)
+                payload.pop("initStrength", None)
+                payload["enhancePrompt"] = bool(use_enhance)  # 恢復原設定
+
+                resp2 = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
+                                      timeout=45, allow_redirects=False)
+                if resp2.status_code >= 400:
+                    print("❌ 降級後仍失敗:", resp2.status_code, resp2.text[:800])
+                    resp2.raise_for_status()
+                gen_id = resp2.json()["sdGenerationJob"]["generationId"]
+                print("✅ 降級重試成功，Generation ID:", gen_id)
+                return wait_for_leonardo_image(gen_id)
+            except Exception as e:
+                print("❌ 降級重試例外：", e)
+                return None
+
+        # 非 img2img 或降級也失敗 → 拋出
+        try:
+            resp.raise_for_status()
+        except Exception:
+            return None
 
     gen_id = resp.json()["sdGenerationJob"]["generationId"]
     print("✅ Leonardo Generation ID:", gen_id)
     return wait_for_leonardo_image(gen_id)  # dict
+
 
 def upload_to_gcs_from_url(image_url, user_id, prompt):
     try:
@@ -483,15 +520,36 @@ def handle_message(event):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪還沒有整理好這段故事，請再多說一點細節吧！"))
                 return
 
+            # 取得這段內容
             story_content = story_paragraphs[user_id][paragraph_num]
             user_extra_desc = re.sub(r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)[，,。.!！]*", "", user_text).strip()
+
+            # >>>>>>> 這裡是「確保 seed / 角色卡」的保險碼 <<<<<<<
+            # 確保 seed
+            if user_id not in user_fixed_seed:
+                user_fixed_seed[user_id] = random.randint(100000, 999999)
+
+            # 確保角色設定卡（若使用者一開始就從第 N 段開局）
+            if not user_character_sheet.get(user_id):
+                seed_prompt = optimize_image_prompt(story_content, "watercolor, children picture book style")
+                user_character_sheet[user_id] = (
+                    "Consistent main character across all images. "
+                    "Same face, hairstyle, clothing, colors, proportions. "
+                    "Watercolor children picture-book style. "
+                    + (seed_prompt or "")
+                )
+            # >>>>>>> 保險碼結束 <<<<<<<
+
+            # 正常優化本段 prompt
             optimized_prompt = optimize_image_prompt(story_content, user_extra_desc or "watercolor children picture book style")
             if not optimized_prompt:
                 optimized_prompt = f"A soft watercolor picture book illustration for children, no text or letters. Story: {story_content} {user_extra_desc}"
 
+            # 加上角色設定卡前綴
             base_prefix = user_character_sheet.get(user_id, "")
             final_prompt = (base_prefix + " Scene description: " + optimized_prompt) if base_prefix else optimized_prompt
 
+            # 參考圖 ID + 固定 seed
             ref_id = user_sessions.get(user_id, {}).get('reference_image_id')
             seed = user_fixed_seed.get(user_id)
 
@@ -507,7 +565,7 @@ def handle_message(event):
             if result and result.get("url"):
                 gcs_url = upload_to_gcs_from_url(result["url"], user_id, final_prompt)
                 if gcs_url:
-                    # 更新「下一張」的參考 image_id
+                    # 以最新一張作為下一張的參考
                     user_sessions[user_id]['reference_image_url'] = gcs_url
                     user_sessions[user_id]['reference_image_id'] = result.get("image_id")
                     reply_messages = [
