@@ -174,26 +174,44 @@ def extract_story_paragraphs(summary):
     clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in filtered]
     return clean_paragraphs[:5]
 
+# --------- 內容審查安全/長度工具 ---------
+def _ensure_once(text: str, needle: str) -> str:
+    """確保 needle 僅附加一次。"""
+    if needle.strip().lower() in (text or "").lower():
+        return text
+    return (text + " " + needle).strip()
+
+def _clamp_prompt_length(text: str, max_len: int = 1450) -> str:
+    """Leonardo 上限 1500，保守 1450；超過即截斷（優先保留前綴與規則）。"""
+    t = re.sub(r'\s+', ' ', text or '').strip()
+    if len(t) <= max_len:
+        return t
+    return t[:max_len]
+
 def _sanitize_text_for_moderation(text: str) -> str:
-    """將可能觸發審查的詞改成安全用語。"""
+    """統一淨化，避免兒童情境誤判與重複附加造成超長。"""
     t = text or ""
-    # 移除年齡（英/中）
+
+    # 敏感詞正規化
     t = re.sub(r'\b\d{1,2}\s*[-]?\s*year[-\s]?old\b', 'adult', t, flags=re.IGNORECASE)
-    t = re.sub(r'(\d{1,2})\s*歲', '成人', t)
-    t = re.sub(r'(\d{1,2})\s*岁', '成人', t)
-    # girl/boy → character / person（盡量中性）
+    t = re.sub(r'(\d{1,2})\s*歲|(\d{1,2})\s*岁', '成人', t)
     t = re.sub(r'\bgirl\b', 'woman', t, flags=re.IGNORECASE)
     t = re.sub(r'\bboy\b', 'man', t, flags=re.IGNORECASE)
-    # children picture-book → whimsical watercolor storybook
     t = re.sub(r'children?\s+picture[-\s]?book', 'whimsical watercolor storybook', t, flags=re.IGNORECASE)
-    # white dress → flowing light-colored outfit（較安全）
-    t = re.sub(r'white\s+dress', 'flowing light-colored outfit', t, flags=re.IGNORECASE)
-    # kid/child → character（避免和服裝/外觀一起被誤判）
     t = re.sub(r'\b(child|kid)\b', 'character', t, flags=re.IGNORECASE)
-    # 加上安全尾註（若沒有）
-    if SAFETY_SUFFIX.strip().lower() not in t.lower():
-        t = f"{t.strip()} {SAFETY_SUFFIX}"
-    return t.strip()
+    t = re.sub(r'white\s+dress', 'flowing light-colored outfit', t, flags=re.IGNORECASE)
+
+    # 正向約束
+    ADULT_RULE = "depict adults only; no minors present."
+    t = _ensure_once(t, ADULT_RULE)
+
+    # 風格與安全尾註（只附加一次）
+    t = _ensure_once(t, SAFE_STYLE_LINE)
+    t = _ensure_once(t, SAFETY_SUFFIX)
+
+    # 長度限制
+    t = _clamp_prompt_length(t, 1450)
+    return t
 
 def optimize_image_prompt(story_content, user_prompt=""):
     try:
@@ -220,11 +238,13 @@ def optimize_image_prompt(story_content, user_prompt=""):
             temperature=0.7,
         )
         p = response.choices[0].message["content"].strip()
-        # 安全處理
-        return _sanitize_text_for_moderation(p)
+        p = _sanitize_text_for_moderation(p)
+        return _clamp_prompt_length(p, 1450)
     except Exception as e:
         print("❌ 優化插圖 prompt 失敗：", e)
-        return _sanitize_text_for_moderation(f"{story_content} {user_prompt}")
+        p = f"{story_content} {user_prompt}"
+        p = _sanitize_text_for_moderation(p)
+        return _clamp_prompt_length(p, 1450)
 
 def format_reply(text):
     return re.sub(r'([。！？])\s*', r'\1\n', text)
@@ -239,12 +259,10 @@ def get_openai_response(user_id, user_message, encouragement_suffix=""):
     if user_id not in story_current_paragraph:
         story_current_paragraph[user_id] = 0
 
+    # 拿掉不友善的那句，僅保留一個中性回覆
     low_engagement_inputs = ["不知道", "沒靈感", "嗯", "算了", "不想說", "先跳過", "跳過這題"]
     if any(phrase in user_message.strip().lower() for phrase in low_engagement_inputs):
-        assistant_reply = random.choice([
-            "沒關係，我們可以慢慢想 👣",
-            "不用急～你已經很棒了 💪"
-        ])
+        assistant_reply = "沒關係，我們可以慢慢想 👣"
         user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
         user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
         return assistant_reply
@@ -353,8 +371,9 @@ def generate_leonardo_image(
         "User-Agent": "storybot/1.0"
     }
 
-    # 送出前最後一道安全處理
+    # 送出前最後一道安全處理 + 長度壓制
     safe_prompt = _sanitize_text_for_moderation(prompt)
+    safe_prompt = _clamp_prompt_length(safe_prompt, 1450)
 
     payload = {
         "modelId": model_id,
@@ -385,11 +404,13 @@ def generate_leonardo_image(
     resp = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
                          timeout=45, allow_redirects=False)
 
-    # 403 審查擋下 → 自動一次重試：更保守的安全版
+    # 403 審查擋下 → 自動一次重試（更保守 + 再次淨化 + 截長）
     if resp.status_code == 403 and "Content moderated" in (resp.text or ""):
         try:
             print("🛡️ 觸發內容審查，改用更保守的安全版 prompt 重新嘗試")
             safer = safe_prompt + " extremely safe, family-friendly, suitable for all ages, absolutely no sensitive context."
+            safer = _sanitize_text_for_moderation(safer)
+            safer = _clamp_prompt_length(safer, 1450)
             payload["prompt"] = safer
             payload["enhancePrompt"] = False
             resp2 = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
@@ -486,7 +507,6 @@ def set_main_character_name(user_id: str, name: str):
     name_line = f"The main character's name is {name}. Do not print any text or name in the image."
     if name_line not in base:
         base = (base + " " + name_line).strip()
-    # 統一風格描述
     if SAFE_STYLE_LINE not in base:
         base = (SAFE_STYLE_LINE + " " + base).strip()
     user_character_sheet[user_id] = base
@@ -532,7 +552,6 @@ def augment_character_sheet_from_user(user_id, zh_desc: str):
             base = ("Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. ")
         if SAFE_STYLE_LINE not in base:
             base += SAFE_STYLE_LINE + " "
-
         if not user_allow_ethnicity_override.get(user_id, False) and "Primary ethnicity:" not in base:
             base += DEFAULT_ETHNICITY_LINE + " "
 
@@ -541,7 +560,6 @@ def augment_character_sheet_from_user(user_id, zh_desc: str):
             base += f"The main character's name is {name}. Do not print any text or name in the image. "
 
         user_character_sheet[user_id] = base + f" Main character always wears/has: {features}. Only the main character has these signature items."
-        # 最後再加一次安全尾註
         if SAFETY_SUFFIX.strip().lower() not in user_character_sheet[user_id].lower():
             user_character_sheet[user_id] += " " + SAFETY_SUFFIX
         print(f"✨ 角色設定卡已更新: {user_character_sheet[user_id]}")
@@ -626,7 +644,7 @@ def handle_message(event):
             ))
             return
 
-        # 在故事模式下，自動產生第一張主角圖
+        # 在故事模式下，自動產生第一張主角圖（定妝照）
         if user_sessions.get(user_id, {}).get("story_mode", False) and user_canonical_image_id.get(user_id) is None:
             if user_message_counts.get(user_id, 0) >= 3:
                 messages = user_sessions.get(user_id, {}).get("messages", [])
