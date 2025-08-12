@@ -270,15 +270,25 @@ def leonardo_poll(gen_id, timeout=150):
             data = r.json()
             print(f"📄 Leonardo 回應資料: {json.dumps(data, ensure_ascii=False)[:500]}...")
             
-            if data.get("generations_v2") and data["generations_v2"][0]["status"] == "COMPLETE":
-                gi = data["generations_v2"][0]["generated_images"][0]
-                image_url = gi.get("url")
-                image_id = gi.get("id")
-                print(f"✅ Leonardo 圖片生成完成！URL: {image_url}, ID: {image_id}")
-                return image_url, image_id
-            elif data.get("generations_v2"):
-                status = data["generations_v2"][0]["status"]
+            # 修正：使用正確的 Leonardo API 回應格式
+            if data.get("generations_by_pk"):
+                generation_data = data["generations_by_pk"]
+                status = generation_data.get("status")
                 print(f"⏳ 圖片生成狀態: {status}")
+                
+                if status == "COMPLETE":
+                    generated_images = generation_data.get("generated_images", [])
+                    if generated_images:
+                        gi = generated_images[0]
+                        image_url = gi.get("url")
+                        image_id = gi.get("id")
+                        print(f"✅ Leonardo 圖片生成完成！URL: {image_url}, ID: {image_id}")
+                        return image_url, image_id
+                    else:
+                        print("❌ 沒有找到生成的圖片")
+                elif status == "FAILED":
+                    print("❌ 圖片生成失敗")
+                    return None, None
             else:
                 print(f"⚠️ 回應格式異常: {data}")
                 
