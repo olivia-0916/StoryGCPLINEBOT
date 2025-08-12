@@ -110,31 +110,49 @@ def load_latest_story_paragraphs(user_id):
 def upload_to_gcs_from_url(url, user_id, prompt):
     tmp_path = None
     try:
+        print(f"📥 開始從 Leonardo 下載圖片: {url}")
         with requests.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
+            print(f"✅ 圖片下載成功，開始串流處理...")
+            
             fd, tmp_path = tempfile.mkstemp(prefix="img_", suffix=".png", dir="/tmp")
             with os.fdopen(fd, "wb") as f:
+                chunk_count = 0
                 for chunk in r.iter_content(chunk_size=1024*64):
                     if chunk:
                         f.write(chunk)
+                        chunk_count += 1
+                print(f"📦 圖片串流完成，共 {chunk_count} 個 chunk")
+                
         filename = f"{user_id}_{uuid.uuid4().hex}.png"
+        print(f"📝 準備上傳到 GCS，檔名: {filename}")
+        
         blob = gcs_bucket.blob(filename)
         blob.upload_from_filename(tmp_path, content_type="image/png")
         gcs_url = f"https://storage.googleapis.com/{GCS_BUCKET}/{filename}"
+        print(f"☁️ 圖片已上傳至 GCS: {gcs_url}")
+        
+        # 儲存到 Firestore
         db.collection("users").document(user_id).collection("images").add({
             "url": gcs_url, "prompt": (prompt or "")[:1500], "timestamp": firestore.SERVER_TIMESTAMP
         })
-        print("✅ 圖片已上傳至 GCS 並儲存：", gcs_url)
+        print("💾 圖片資訊已儲存到 Firestore")
+        
         return gcs_url
+        
     except Exception as e:
-        print("❌ GCS upload failed:", e)
+        print(f"❌ GCS 上傳失敗: {e}")
+        traceback.print_exc()
         return None
     finally:
         try:
-            if tmp_path and os.path.exists(tmp_path): os.remove(tmp_path)
-        except Exception:
-            pass
+            if tmp_path and os.path.exists(tmp_path): 
+                os.remove(tmp_path)
+                print(f"🧹 暫存檔案已清理: {tmp_path}")
+        except Exception as e:
+            print(f"⚠️ 清理暫存檔案失敗: {e}")
         gc.collect()
+        print("♻️ 記憶體已清理")
 
 # ---------- 故事摘要（只在要求時生成；五段乾淨文字） ----------
 def generate_story_summary(messages):
@@ -236,19 +254,48 @@ def leonardo_tti(payload):
 def leonardo_poll(gen_id, timeout=150):
     url = f"{LEO_BASE}/generations/{gen_id}"
     start = time.time()
+    print(f"🔄 開始輪詢 Leonardo 生成狀態：{gen_id}")
+    
     while time.time()-start < timeout:
         time.sleep(4)
-        r = requests.get(url, headers=leonardo_headers(), timeout=30)
-        if not r.ok:
-            print("❌ Leonardo GET 失敗:", r.status_code, r.text)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("generations_v2") and data["generations_v2"][0]["status"] == "COMPLETE":
-            gi = data["generations_v2"][0]["generated_images"][0]
-            return gi.get("url"), gi.get("id")
+        try:
+            r = requests.get(url, headers=leonardo_headers(), timeout=30)
+            print(f"📥 檢查狀態嘗試，status: {r.status_code}")
+            
+            if not r.ok:
+                print(f"❌ Leonardo GET 失敗: {r.status_code}, {r.text}")
+                continue
+                
+            r.raise_for_status()
+            data = r.json()
+            print(f"📄 Leonardo 回應資料: {json.dumps(data, ensure_ascii=False)[:500]}...")
+            
+            if data.get("generations_v2") and data["generations_v2"][0]["status"] == "COMPLETE":
+                gi = data["generations_v2"][0]["generated_images"][0]
+                image_url = gi.get("url")
+                image_id = gi.get("id")
+                print(f"✅ Leonardo 圖片生成完成！URL: {image_url}, ID: {image_id}")
+                return image_url, image_id
+            elif data.get("generations_v2"):
+                status = data["generations_v2"][0]["status"]
+                print(f"⏳ 圖片生成狀態: {status}")
+            else:
+                print(f"⚠️ 回應格式異常: {data}")
+                
+        except Exception as e:
+            print(f"❌ 檢查狀態時發生錯誤: {e}")
+            traceback.print_exc()
+            
+    print(f"⏰ 輪詢超時 ({timeout}s)，生成 ID: {gen_id}")
     return None, None
 
 def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_image_id=None, init_strength=None):
+    print(f"🎨 開始 Leonardo 圖片生成...")
+    print(f"👤 用戶 ID: {user_id}")
+    print(f"🔑 種子值: {seed}")
+    print(f"🖼️ 初始圖片 ID: {init_image_id}")
+    print(f"💪 初始強度: {init_strength}")
+    
     payload = {
         "modelId": LEO_MODEL,
         "prompt": prompt[:1500],
@@ -263,16 +310,29 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
     if init_image_id and init_strength:
         payload["isInitImage"] = True
         payload["init_generation_image_id"] = init_image_id
-        payload["init_strength"] = float(init_strength)  # 正確鍵
+        payload["init_strength"] = float(init_strength)
+        print(f"🔄 使用 Image-to-Image 模式")
 
     print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
+    
     try:
         gen_id = leonardo_tti(payload)
         print("✅ Leonardo Generation ID:", gen_id)
+        
         url, image_id = leonardo_poll(gen_id)
         if url:
+            print(f"🎉 Leonardo 圖片生成成功！開始上傳到 GCS...")
             gcs_url = upload_to_gcs_from_url(url, user_id, prompt)
-            return {"url": gcs_url, "image_id": image_id}
+            if gcs_url:
+                print(f"🎊 完整流程成功！GCS URL: {gcs_url}")
+                return {"url": gcs_url, "image_id": image_id}
+            else:
+                print("❌ GCS 上傳失敗")
+                return None
+        else:
+            print("❌ Leonardo 圖片生成失敗或超時")
+            return None
+            
     except requests.HTTPError as e:
         if init_image_id and "Unexpected variable" in str(e):
             print("↩️ 自動降級：改用 text-to-image 重試（保留 seed 與 prompt）")
@@ -280,8 +340,12 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
                 user_id=user_id, prompt=prompt, negative_prompt=negative_prompt,
                 seed=seed, init_image_id=None, init_strength=None
             )
-        print("❌ Leonardo 例外：", e)
-    return None
+        print("❌ Leonardo HTTP 錯誤：", e)
+        return None
+    except Exception as e:
+        print(f"❌ Leonardo 其他錯誤：{e}")
+        traceback.print_exc()
+        return None
 
 # ---------- 引導與格式 ----------
 base_system_prompt = (
@@ -337,58 +401,91 @@ GEN_SEMAPHORE = threading.Semaphore(2)   # 同時最多 2 個生成任務
 
 def bg_generate_and_push_draw(user_id, n, extra_desc):
     """背景生成第 n 段插圖，完成後 push 回去"""
+    print(f"🎬 開始背景生成第 {n+1} 段插圖...")
+    
     with GEN_SEMAPHORE:
         try:
             sess = user_sessions.setdefault(user_id, {"messages": [], "story_mode": True, "summary": "", "paras": []})
+            print(f"📚 載入用戶 {user_id} 的會話資料")
+            
             paras = load_latest_story_paragraphs(user_id) or sess.get("paras") or []
             if not paras:
-                # 臨時整理一次
+                print("📝 沒有找到故事段落，開始臨時整理...")
                 msgs = [{"role":"system","content":base_system_prompt}] + sess["messages"][-40:]
                 summary = generate_story_summary(msgs)
                 sess["summary"] = summary
                 paras = extract_paragraphs(summary)
                 sess["paras"] = paras
-                if paras: save_story_summary(user_id, paras)
+                if paras: 
+                    save_story_summary(user_id, paras)
+                    print(f"✅ 已儲存 {len(paras)} 段故事摘要")
+                else:
+                    print("❌ 故事摘要生成失敗")
+                    
             if not paras or n >= len(paras):
+                print(f"❌ 故事段落不足，需要 {n+1} 段，但只有 {len(paras)} 段")
                 line_bot_api.push_message(user_id, TextSendMessage("資訊不足，這段再給我一些細節好嗎？"))
                 return
 
+            print(f"📖 第 {n+1} 段故事內容: {paras[n][:100]}...")
+
             # 建 brief（如無）
             if not user_scene_briefs.get(user_id):
+                print("🎭 開始建立場景簡介...")
                 world = get_world(user_id)
                 user_scene_briefs[user_id] = [build_scene_brief(p, world) for p in paras]
+                print(f"✅ 已建立 {len(user_scene_briefs[user_id])} 個場景簡介")
+                
             scene = user_scene_briefs[user_id][n]
+            print(f"🎬 場景簡介: {json.dumps(scene, ensure_ascii=False)}")
 
             # prompt
             prompt, neg = build_image_prompt(user_id, scene, extra_desc)
+            print(f"🎨 圖片 prompt: {prompt[:200]}...")
+            print(f"🚫 負面 prompt: {neg[:200]}...")
+            
             ref_id = user_definitive_imgid.get(user_id)
             seed   = user_fixed_seed.setdefault(user_id, random.randint(100000,999999))
+            print(f"🖼️ 參考圖片 ID: {ref_id}")
+            print(f"🌱 種子值: {seed}")
 
             result = generate_leonardo_image(
                 user_id=user_id, prompt=prompt, negative_prompt=neg,
                 seed=seed, init_image_id=ref_id, init_strength=0.24 if ref_id else None
             )
+            
             if result and result["url"]:
+                print(f"🎊 圖片生成成功！開始更新定妝參考...")
                 # 更新定妝參考
                 user_definitive_imgid[user_id] = result.get("image_id", ref_id) or ref_id
                 user_definitive_url[user_id]   = result["url"]
+                print(f"✅ 定妝參考已更新: {user_definitive_imgid[user_id]}")
+                
+                # 推送到 LINE
+                print(f"📱 開始推送到 LINE...")
                 line_bot_api.push_message(user_id, [
                     TextSendMessage(f"第 {n+1} 段完成了！"),
                     ImageSendMessage(result["url"], result["url"])
                 ])
                 save_chat(user_id, "assistant", f"[image]{result['url']}")
+                print(f"🎉 第 {n+1} 段插圖已成功推送到用戶！")
             else:
+                print("❌ 圖片生成失敗")
                 line_bot_api.push_message(user_id, TextSendMessage("這段暫時畫不出來，再補充一點動作或場景試試？"))
+                
         except Exception as e:
-            print("❌ 背景生成失敗：", e)
+            print(f"❌ 背景生成第 {n+1} 段插圖失敗：{e}")
             traceback.print_exc()
             try:
-                line_bot_api.push_message(user_id, TextSendMessage("生成中遇到小狀況，等下再試一次可以嗎？"))
-            except Exception:
-                pass
+                line_bot_api.push_message(user_id, TextSendMessage(f"生成第 {n+1} 段時遇到小狀況，等下再試一次可以嗎？"))
+                print(f"📱 已向用戶發送錯誤訊息")
+            except Exception as push_error:
+                print(f"❌ 無法向用戶發送錯誤訊息：{push_error}")
 
 def bg_generate_and_push_portrait(user_id):
     """背景生成定妝照"""
+    print(f"🎭 開始背景生成定妝照，用戶: {user_id}")
+    
     with GEN_SEMAPHORE:
         try:
             if user_character_sheet.get(user_id) is None:
@@ -397,30 +494,47 @@ def bg_generate_and_push_portrait(user_id):
                     "Whimsical watercolor storybook style. Primary ethnicity: East Asian features; black hair, dark brown eyes, warm fair skin. "
                     "Signature outfit/items must appear on the main character only."
                 )
+                print(f"✨ 已設定預設角色設定卡")
+            else:
+                print(f"📋 使用現有角色設定卡: {user_character_sheet[user_id][:100]}...")
+                
             seed = user_fixed_seed.setdefault(user_id, random.randint(100000,999999))
             prompt = user_character_sheet[user_id] + " family-friendly, wholesome, uplifting tone, modest clothing, safe for work, non-violent."
+            print(f"🎨 定妝照 prompt: {prompt[:200]}...")
+            print(f"🌱 種子值: {seed}")
+            
             result = generate_leonardo_image(
                 user_id=user_id, prompt=prompt,
                 negative_prompt="text, letters, words, captions, subtitles, watermark, signature",
                 seed=seed
             )
+            
             if result and result["url"]:
+                print(f"🎊 定妝照生成成功！開始更新定妝參考...")
                 user_definitive_imgid[user_id] = result["image_id"]
                 user_definitive_url[user_id]   = result["url"]
+                print(f"✅ 定妝參考已更新: {user_definitive_imgid[user_id]}")
+                
+                # 推送到 LINE
+                print(f"📱 開始推送到 LINE...")
                 line_bot_api.push_message(user_id, [
                     TextSendMessage("定妝照完成囉～之後會以此為基準！"),
                     ImageSendMessage(result["url"], result["url"])
                 ])
                 save_chat(user_id, "assistant", f"[image]{result['url']}")
+                print(f"🎉 定妝照已成功推送到用戶！")
             else:
+                print("❌ 定妝照生成失敗")
                 line_bot_api.push_message(user_id, TextSendMessage("定妝照暫時失敗，再試一次？"))
+                
         except Exception as e:
-            print("❌ 背景定妝失敗：", e)
+            print(f"❌ 背景定妝失敗：{e}")
             traceback.print_exc()
             try:
                 line_bot_api.push_message(user_id, TextSendMessage("定妝照遇到小狀況，等下再試一次可以嗎？"))
-            except Exception:
-                pass
+                print(f"📱 已向用戶發送錯誤訊息")
+            except Exception as push_error:
+                print(f"❌ 無法向用戶發送錯誤訊息：{push_error}")
 
 # ---------- 主處理 ----------
 @handler.add(MessageEvent, message=TextMessage)
@@ -504,3 +618,5 @@ if __name__ == "__main__":
     # 建議在部署層設定：GUNICORN_CMD_ARGS="--workers 1 --threads 8 --timeout 180"
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
+    
