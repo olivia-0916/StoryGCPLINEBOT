@@ -89,7 +89,6 @@ DEFAULT_ETHNICITY_LINE = (
 )
 
 SAFE_STYLE_LINE = "Whimsical watercolor storybook illustration style."
-# 保守安全尾註（不含容易誤判的詞）
 SAFETY_SUFFIX = "family-friendly, wholesome, uplifting tone, modest clothing, safe for work, non-violent."
 
 # ========= 系統提示 =========
@@ -182,40 +181,6 @@ def reset_story_memory(user_id):
     user_storyboard[user_id] = []
     print(f"✅ 已重置使用者 {user_id} 的故事記憶與一致性設定")
 
-def generate_story_summary(messages):
-    try:
-        summary_prompt = """
-請將以下對話內容整理成五個段落的故事情節，每段直接是故事內容，不要加小標題、開場白、分隔線、標題、感謝語或任何說明文字。
-每段約40字，請盡量保留用戶描述的細節，不要省略重要情節或角色行動。
-請確保五段故事涵蓋用戶所有描述過的重要事件與細節。
-每段前面加數字（1. 2. 3. 4. 5.）。
-"""
-        messages_for_summary = [
-            {"role": "system", "content": summary_prompt},
-            {"role": "user", "content": "以下是故事對話內容："},
-            *messages
-        ]
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=messages_for_summary,
-            temperature=0.7,
-        )
-        return response.choices[0].message["content"]
-    except Exception as e:
-        print("❌ 生成故事總結失敗：", e)
-        return None
-
-def extract_story_paragraphs(summary):
-    paragraphs = [p.strip() for p in summary.split('\n') if p.strip()]
-    filtered = [
-        p for p in paragraphs
-        if not re.match(r'^(好的|以下|讓我來|整理一下|故事如下|Summary|Here is|Here are|謝謝|---|\*\*故事標題)', p)
-        and not re.match(r'^\*+$', p)
-        and not re.match(r'^\*\*.*\*\*$', p)
-    ]
-    clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in filtered]
-    return clean_paragraphs[:5]
-
 # --------- 內容審查安全/長度工具 ---------
 def _ensure_once(text: str, needle: str) -> str:
     if needle.strip().lower() in (text or "").lower():
@@ -240,6 +205,95 @@ def _sanitize_text_for_moderation(text: str) -> str:
     t = _clamp_prompt_length(t, 1450)
     return t
 
+# ========= 摘要（加長＆結構化） =========
+def generate_story_summary(messages):
+    """
+    產生「給使用者看」也「給繪圖用」的長摘要。
+    每段 60~90 字，並帶：場景/時間/主體/動作/關鍵物件（若已知）。
+    """
+    try:
+        sys_prompt = (
+            "請把以下對話整理成五段故事摘要。"
+            "要求：每段 60~90 個中文字，務必包含【場景】、【時間】、【主體與動作】、【關鍵物件/線索】。"
+            "每段前加 1. 2. 3. 4. 5.，僅輸出純內容，不要加標題或多餘說明。"
+            "如果對話缺少資訊，請依合理想像補齊，但須與前文一致（如整體多在森林，就延續森林）。"
+        )
+        content = "\n".join([m["content"] for m in messages if m.get("content")])
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": sys_prompt},
+                      {"role": "user", "content": content}],
+            temperature=0.5,
+        )
+        return resp.choices[0].message["content"]
+    except Exception as e:
+        print("❌ 生成故事總結失敗：", e)
+        return None
+
+def extract_story_paragraphs(summary):
+    paragraphs = [p.strip() for p in summary.split('\n') if p.strip()]
+    filtered = [
+        p for p in paragraphs
+        if not re.match(r'^(好的|以下|讓我來|整理一下|故事如下|Summary|Here is|Here are|謝謝|---|\*\*故事標題)', p)
+        and not re.match(r'^\*+$', p)
+        and not re.match(r'^\*\*.*\*\*$', p)
+    ]
+    clean_paragraphs = [re.sub(r'^\d+\.\s*', '', p) for p in filtered]
+    return clean_paragraphs[:5]
+
+# ========= 語意分鏡與世界預設 =========
+def generate_semantic_storyboard(messages):
+    """
+    讀對話 → 產出每段分鏡 JSON（英文短語），補齊缺漏，給繪圖更穩的關鍵字。
+    """
+    try:
+        sys_prompt = (
+            "You are a storyboard extractor. Read the conversation/story and output a compact JSON with a 'paragraphs' array. "
+            "Each item must include: setting, time_of_day, mood, foreground, background, key_objects (array), "
+            "and characters (array of {name?, role(main/support/none), age(adult), appearance}). "
+            "Prefer concise English phrases. If something is missing, make a best guess based on earlier context (e.g., forest setting). "
+            "Never include any commentary. Valid JSON only."
+        )
+        content = "\n".join([f"{m['role']}: {m['content']}" for m in messages if m.get("content")])
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"system","content":sys_prompt},{"role":"user","content":content}],
+            temperature=0.2,
+        )
+        raw = resp.choices[0].message["content"].strip()
+        data = json.loads(raw)
+        if not isinstance(data, dict) or "paragraphs" not in data:
+            raise ValueError("no paragraphs")
+        for p in data["paragraphs"]:
+            for k in ["setting","time_of_day","mood","foreground","background"]:
+                if k in p and isinstance(p[k], str):
+                    p[k] = re.sub(r"\s+", " ", p[k]).strip()[:200]
+        return data
+    except Exception as e:
+        print("❌ generate_semantic_storyboard 失敗：", e)
+        return {"paragraphs":[]}
+
+def derive_world_defaults_from_board(board, current_defaults=None):
+    defaults = dict(current_defaults or {})
+    paragraphs = (board or {}).get("paragraphs") or []
+    if paragraphs:
+        if not defaults.get("setting"):
+            settings = [p.get("setting","").strip() for p in paragraphs if p.get("setting")]
+            if settings:
+                defaults["setting"] = Counter(settings).most_common(1)[0][0]
+        if not defaults.get("time_of_day"):
+            tods = [p.get("time_of_day","").strip() for p in paragraphs if p.get("time_of_day")]
+            if tods:
+                defaults["time_of_day"] = tods[0]
+        if not defaults.get("mood"):
+            moods = [p.get("mood","").strip() for p in paragraphs if p.get("mood")]
+            if moods:
+                defaults["mood"] = moods[0]
+    if not defaults.get("palette"):
+        defaults["palette"] = "soft watercolor palette, greens and warm light"
+    return defaults
+
+# ========= Prompt 組裝 =========
 def optimize_image_prompt(story_content, user_prompt=""):
     try:
         style_map = {
@@ -273,135 +327,6 @@ def optimize_image_prompt(story_content, user_prompt=""):
         p = _sanitize_text_for_moderation(p)
         return _clamp_prompt_length(p, 1450)
 
-def format_reply(text):
-    return re.sub(r'([。！？])\s*', r'\1\n', text)
-
-def get_openai_response(user_id, user_message, encouragement_suffix=""):
-    if user_id not in user_sessions or "messages" not in user_sessions[user_id]:
-        user_sessions[user_id] = {"messages": [], "story_mode": False}
-    if user_id not in user_message_counts:
-        user_message_counts[user_id] = 0
-    if user_id not in story_summaries:
-        story_summaries[user_id] = ""
-    if user_id not in story_current_paragraph:
-        story_current_paragraph[user_id] = 0
-
-    # 中性 fallback
-    low_engagement_inputs = ["不知道", "沒靈感", "嗯", "算了", "不想說", "先跳過", "跳過這題"]
-    if any(phrase in user_message.strip().lower() for phrase in low_engagement_inputs):
-        assistant_reply = "沒關係，我們可以慢慢想 👣"
-        user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
-        user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
-        return assistant_reply
-
-    user_sessions[user_id]["messages"].append({"role": "user", "content": user_message})
-    user_message_counts[user_id] += 1
-
-    if user_message_counts[user_id] % 6 == 0:
-        story_current_paragraph[user_id] = min(4, story_current_paragraph[user_id] + 1)
-
-    summary_context = story_summaries.get(user_id, "")
-    prompt_with_summary = base_system_prompt
-    if summary_context:
-        prompt_with_summary += f"\n\n【故事摘要】\n{summary_context}\n請根據以上摘要，延續創作對話內容。"
-
-    recent_history = user_sessions[user_id]["messages"][-30:]
-    messages = [{"role": "system", "content": prompt_with_summary}] + recent_history
-
-    try:
-        print(f"📦 傳給 OpenAI 的訊息：{json.dumps(messages, ensure_ascii=False)}")
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.7,
-        )
-        raw_reply = response.choices[0].message["content"]
-        assistant_reply = format_reply(raw_reply)
-        if encouragement_suffix:
-            assistant_reply += f"\n\n{encouragement_suffix}"
-        user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
-        return assistant_reply
-    except Exception as e:
-        print("❌ OpenAI 回應錯誤：", e)
-        traceback.print_exc()
-        return None
-
-def save_to_firebase(user_id, role, text):
-    try:
-        user_doc_ref = db.collection("users").document(user_id)
-        user_doc_ref.collection("chat").add({
-            "role": role,
-            "text": text,
-            "timestamp": firestore.SERVER_TIMESTAMP
-        })
-        print(f"✅ Firebase 已儲存訊息（{role}）")
-    except Exception as e:
-        print(f"⚠️ 儲存 Firebase 失敗（{role}）：", e)
-
-# ========= 語意分鏡與世界預設 =========
-def generate_semantic_storyboard(messages):
-    """
-    讀對話 → 產出每段分鏡 JSON：
-    {
-      "paragraphs":[
-        {"setting":"enchanted forest","time_of_day":"day","mood":"warm",
-         "foreground":"...","background":"...",
-         "characters":[{"name":"Kaka","role":"main","age":"adult","appearance":"long black hair, red floral dress, East Asian facial features"}],
-         "key_objects":["magic backpack","pancake machine"]}
-      ]
-    }
-    """
-    try:
-        sys_prompt = (
-            "You are a storyboard extractor. Read the conversation/story and output a compact JSON with a 'paragraphs' array. "
-            "Each item must include: setting, time_of_day, mood, foreground, background, key_objects (array), "
-            "and characters (array of {name?, role(main/support/none), age(adult), appearance}). "
-            "Prefer concise English phrases. If something is missing, make a best guess based on earlier context. "
-            "Never include any commentary. Valid JSON only."
-        )
-        content = "\n".join([f"{m['role']}: {m['content']}" for m in messages if m.get("content")])
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"system","content":sys_prompt},{"role":"user","content":content}],
-            temperature=0.2,
-        )
-        raw = resp.choices[0].message["content"].strip()
-        data = json.loads(raw)
-        if not isinstance(data, dict) or "paragraphs" not in data:
-            raise ValueError("no paragraphs")
-        # 緊縮每段字串
-        for p in data["paragraphs"]:
-            for k in ["setting","time_of_day","mood","foreground","background"]:
-                if k in p and isinstance(p[k], str):
-                    p[k] = re.sub(r"\s+", " ", p[k]).strip()[:200]
-        return data
-    except Exception as e:
-        print("❌ generate_semantic_storyboard 失敗：", e)
-        return {"paragraphs":[]}
-
-def derive_world_defaults_from_board(board, current_defaults=None):
-    """
-    從分鏡推論世界預設：setting/mood/time_of_day/調色。若已有預設就不覆蓋強者（以第一次為主）。
-    """
-    defaults = dict(current_defaults or {})
-    paragraphs = (board or {}).get("paragraphs") or []
-    if paragraphs:
-        if not defaults.get("setting"):
-            settings = [p.get("setting","").strip() for p in paragraphs if p.get("setting")]
-            if settings:
-                defaults["setting"] = Counter(settings).most_common(1)[0][0]
-        if not defaults.get("time_of_day"):
-            tods = [p.get("time_of_day","").strip() for p in paragraphs if p.get("time_of_day")]
-            if tods:
-                defaults["time_of_day"] = tods[0]
-        if not defaults.get("mood"):
-            moods = [p.get("mood","").strip() for p in paragraphs if p.get("mood")]
-            if moods:
-                defaults["mood"] = moods[0]
-    if not defaults.get("palette"):
-        defaults["palette"] = "soft watercolor palette, greens and warm light"
-    return defaults
-
 def compose_scene_prompt(user_id, paragraph_idx, fallback_story_text: str, user_extra_desc: str):
     # 世界預設
     wd = user_world_defaults.get(user_id) or {}
@@ -420,9 +345,8 @@ def compose_scene_prompt(user_id, paragraph_idx, fallback_story_text: str, user_
         fg = p.get("foreground","")
         bg = p.get("background","")
         key_objs = ", ".join(p.get("key_objects") or [])
-        # 角色：如果主角有 appearance，就補到 final（再加 signature features）
-        main_name = user_main_character_name.get(user_id, "")
         main_appearance = ""
+        name = user_main_character_name.get(user_id, "")
         for ch in (p.get("characters") or []):
             if (ch.get("role") or "").lower() == "main":
                 main_appearance = ch.get("appearance","")
@@ -431,7 +355,6 @@ def compose_scene_prompt(user_id, paragraph_idx, fallback_story_text: str, user_
         if sig:
             main_appearance = (main_appearance + ", " + sig).strip(", ").strip()
 
-        # 組 scene 描述
         scene_bits = [
             f"setting: {setting}" if setting else "",
             f"time of day: {time_of_day}" if time_of_day else "",
@@ -443,20 +366,17 @@ def compose_scene_prompt(user_id, paragraph_idx, fallback_story_text: str, user_
         ]
         scene_desc = ", ".join([b for b in scene_bits if b])
 
-        # 使用者額外描述
         extra = user_extra_desc.strip()
         if extra:
             scene_desc = (scene_desc + ". " + extra).strip(". ")
 
-        # 角色卡 + 場景
         base_prefix = user_character_sheet.get(user_id, "")
         final_prompt = (base_prefix + " " + SAFE_STYLE_LINE + " Scene description: " + scene_desc).strip()
-        # 安全與長度控制
         final_prompt = _sanitize_text_for_moderation(final_prompt)
         final_prompt = _clamp_prompt_length(final_prompt, 1450)
         return final_prompt
 
-    # 若沒有 storyboard 該段，退回舊法
+    # 若沒有 storyboard 該段，退回舊法並回填世界觀
     optimized = optimize_image_prompt(fallback_story_text, user_extra_desc or "watercolor storybook style")
     if setting:
         optimized = f"setting: {setting}. {optimized}"
@@ -484,7 +404,6 @@ def wait_for_leonardo_image(generation_id, timeout=120):
             r.raise_for_status()
 
         data = r.json()
-        # 適配 v1/v2 結構
         g = data.get("generations_by_pk") or data.get("generations_v2", [{}])[0] or {}
         status = g.get("status")
         if status == "COMPLETE":
@@ -512,7 +431,7 @@ def generate_leonardo_image(
     seed=None,
     width=IMG_W,
     height=IMG_H,
-    extra_negative=None           # 額外負向字串
+    extra_negative=None
 ):
     if not LEONARDO_API_KEY:
         print("❌ LEONARDO_API_KEY 未設定")
@@ -526,7 +445,7 @@ def generate_leonardo_image(
         "Authorization": f"Bearer {LEONARDO_API_KEY}",
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "storybot/1.0"
+        "User-Agent": "storybot/1.1"
     }
 
     safe_prompt = _sanitize_text_for_moderation(prompt)
@@ -549,12 +468,19 @@ def generate_leonardo_image(
     def _is_valid_uuid(s: str) -> bool:
         return bool(re.match(r"^[0-9a-fA-F-]{36}$", s or ""))
 
-    use_img2img = bool(reference_image_id and init_strength is not None and _is_valid_uuid(reference_image_id))
-    if use_img2img:
-        payload["isInitImage"] = True
+    # ✅ 正確的 img2img 參數（snake_case），並加入 Character Reference ControlNet
+    if reference_image_id and init_strength is not None and _is_valid_uuid(reference_image_id):
         payload["init_generation_image_id"] = reference_image_id
-        payload["initStrength"] = float(init_strength)
+        payload["init_strength"] = float(init_strength)
         payload["enhancePrompt"] = False  # 降漂移
+        payload["controlnets"] = [
+            {
+                "initImageId": reference_image_id,
+                "initImageType": "GENERATED",
+                "preprocessorId": 133,   # Character Reference
+                "strengthType": "High"
+            }
+        ]
 
     print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
     resp = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
@@ -573,9 +499,8 @@ def generate_leonardo_image(
 
             payload["prompt"] = scene_only
             payload["enhancePrompt"] = False
-            payload.pop("isInitImage", None)
-            payload.pop("init_generation_image_id", None)
-            payload.pop("initStrength", None)
+            for k in ["init_generation_image_id", "init_strength", "controlnets"]:
+                payload.pop(k, None)
 
             resp2 = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
                                   timeout=45, allow_redirects=False)
@@ -595,13 +520,12 @@ def generate_leonardo_image(
         except Exception:
             pass
 
-        # img2img 400 → 自動降級為 text-to-image
-        if use_img2img:
+        # 若是 img2img 造成 400 → 自動降級為 text-to-image
+        if "init_generation_image_id" in payload:
             print("↩️ 自動降級：改用 text-to-image 重試（保留 seed 與 prompt）")
             try:
-                payload.pop("isInitImage", None)
-                payload.pop("init_generation_image_id", None)
-                payload.pop("initStrength", None)
+                for k in ["init_generation_image_id", "init_strength", "controlnets"]:
+                    payload.pop(k, None)
                 payload["enhancePrompt"] = bool(use_enhance)
 
                 resp2 = requests.post(f"{LEO_BASE}/generations", headers=headers, json=payload,
@@ -973,7 +897,8 @@ def handle_message(event):
                 context = "\n".join([f"{i+1}. {p}" for i, p in enumerate(pars)]) or "1. （目前尚無內容）"
                 want_num = target_idx + 1
                 prompt = (
-                    "請延續以下故事，補出缺少的下一段，約40字，直接給故事內容，不要加任何說明或標題。\n"
+                    "請延續以下故事，補出缺少的下一段，60~90 個中文字，"
+                    "務必寫出【場景/時間/主體與動作/關鍵物件】；僅輸出純內容。\n"
                     f"已完成的段落：\n{context}\n"
                     f"請產生第 {want_num} 段："
                 )
@@ -1116,15 +1041,41 @@ def handle_message(event):
                 "你真是故事大師！😊"
             ])
 
-        assistant_reply = get_openai_response(user_id, user_text, encouragement_suffix)
+        # 記錄使用者訊息到 session
+        if user_id not in user_sessions or "messages" not in user_sessions[user_id]:
+            user_sessions[user_id] = {"messages": [], "story_mode": False}
+        user_sessions[user_id]["messages"].append({"role": "user", "content": user_text})
+        user_message_counts[user_id] = user_message_counts.get(user_id, 0) + 1
 
-        if not assistant_reply:
+        summary_context = story_summaries.get(user_id, "")
+        prompt_with_summary = base_system_prompt
+        if summary_context:
+            prompt_with_summary += f"\n\n【故事摘要】\n{summary_context}\n請根據以上摘要，延續創作對話內容。"
+
+        recent_history = user_sessions[user_id]["messages"][-30:]
+        messages = [{"role": "system", "content": prompt_with_summary}] + recent_history
+
+        try:
+            print(f"📦 傳給 OpenAI 的訊息：{json.dumps(messages, ensure_ascii=False)}")
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.7,
+            )
+            raw_reply = response.choices[0].message["content"]
+            assistant_reply = re.sub(r'([。！？])\s*', r'\1\n', raw_reply)
+            if encouragement_suffix:
+                assistant_reply += f"\n\n{encouragement_suffix}"
+
+            user_sessions[user_id]["messages"].append({"role": "assistant", "content": assistant_reply})
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
+            save_to_firebase(user_id, "user", user_text)
+            save_to_firebase(user_id, "assistant", assistant_reply)
+        except Exception as e:
+            print("❌ OpenAI 回應錯誤：", e)
+            traceback.print_exc()
             line_bot_api.reply_message(reply_token, TextSendMessage(text="小繪暫時卡住了，請稍後再試喔"))
             return
-
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=assistant_reply))
-        save_to_firebase(user_id, "user", user_text)
-        save_to_firebase(user_id, "assistant", assistant_reply)
 
     except Exception as e:
         print("❌ 發生錯誤：", e)
