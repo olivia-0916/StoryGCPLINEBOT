@@ -40,12 +40,11 @@ LEO_MODEL = "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"   # Lucid Origin
 IMG_W = 512
 IMG_H = 512
 
-# ---------- 會話狀態 ----------
-user_sessions         = {}  # {user_id: {"messages":[...], "story_mode":True, "summary":"", "paras":[...]} }
-user_character_cards  = {}  # {user_id: {"物種": "貓", "髮型": "長髮", "眼型": "大眼睛", "體型": "高", "年齡": "年輕", "能力": "魔法"}}
-user_story_contexts   = {}  # {user_id: "故事背景"}
-user_last_images      = {}  # {user_id: {"url": "...", "image_id": "..."}}
-user_seeds            = {}  # {user_id: 隨機種子值}
+# ---------- 會話 / 記憶 ----------
+user_sessions       = {}  # {uid: {"messages":[...], "paras":[...], "summary":str}}
+user_last_images    = {}  # {uid: {"url":..., "image_id":...}}
+user_seeds          = {}  # {uid: int}
+user_anchor_cards   = {}  # {uid: {...完整角色藍圖...}}
 
 # ---------- OpenAI ----------
 def _chat(messages, temperature=0.7):
@@ -95,6 +94,24 @@ def load_latest_story_paragraphs(user_id):
         print("⚠️ load_latest_story_paragraphs 失敗：", e)
     return None
 
+def save_anchor(user_id, anchor):
+    try:
+        db.collection("users").document(user_id).collection("story")\
+          .document("anchor").set(anchor, merge=True)
+        print("✅ Anchor Card 已儲存")
+    except Exception as e:
+        print("⚠️ save_anchor 失敗：", e)
+
+def load_anchor(user_id):
+    try:
+        doc = db.collection("users").document(user_id).collection("story")\
+               .document("anchor").get()
+        if doc.exists:
+            return doc.to_dict()
+    except Exception as e:
+        print("⚠️ load_anchor 失敗：", e)
+    return None
+
 # ---------- GCS 上傳 ----------
 def upload_to_gcs_from_url(url, user_id, prompt):
     tmp_path = None
@@ -140,143 +157,168 @@ def extract_paragraphs(summary):
     lines = [re.sub(r"^\d+\.\s*","",x.strip()) for x in summary.split("\n") if x.strip()]
     return lines[:5]
 
-# ---------- 智能角色特徵提取 ----------
-def extract_character_features(text):
-    """智能提取角色特徵，支援任何類型的角色描述"""
-    features = {}
-    
-    # 服裝特徵
-    clothing_patterns = {
-        "裙子": r"(長裙|短裙|連衣裙|百褶裙|紗裙|公主裙|禮服)",
-        "上衣": r"(上衣|襯衫|T恤|毛衣|外套|大衣|西裝)",
-        "褲子": r"(褲子|長褲|短褲|牛仔褲|休閒褲)",
-        "鞋子": r"(鞋子|靴子|運動鞋|高跟鞋|涼鞋)",
-        "配件": r"(帽子|眼鏡|項鍊|手錶|包包|圍巾)"
+# ---------- 中文→英文規範化（視覺特徵） ----------
+ZH2EN_COLOR = {
+    "灰色":"gray","黑色":"black","白色":"white","紅色":"red","藍色":"blue","綠色":"green",
+    "黃色":"yellow","粉色":"pink","紫色":"purple","橙色":"orange","棕色":"brown","咖啡色":"brown"
+}
+ZH2EN_HAIR = {
+    "長髮":"long hair","短髮":"short hair","捲髮":"curly hair","直髮":"straight hair","馬尾":"ponytail","辮子":"braids","瀏海":"bangs"
+}
+ZH2EN_EYES = {
+    "大眼睛":"large eyes","小眼睛":"small eyes","圓眼":"round eyes","鳳眼":"almond eyes","單眼皮":"single eyelids","雙眼皮":"double eyelids"
+}
+ZH2EN_BODY = {
+    "高":"tall","矮":"short","胖":"chubby","瘦":"slim","壯":"muscular","嬌小":"petite","苗條":"slender"
+}
+ZH2EN_AGE = {
+    "年輕":"young adult","老":"elderly","中年":"middle-aged","小孩":"child","大人":"adult","青少年":"teen"
+}
+ZH2EN_SPECIES = {
+    "動物":"animal","貓":"cat","狗":"dog","鳥":"bird","魚":"fish","龍":"dragon","精靈":"elf","機器人":"robot","外星人":"alien","人類":"human"
+}
+ZH2EN_CLOTHING = {
+    "長裙":"long skirt","短裙":"short skirt","連衣裙":"dress","百褶裙":"pleated skirt","紗裙":"tulle skirt","公主裙":"princess dress","禮服":"gown",
+    "上衣":"top","襯衫":"shirt","T恤":"t-shirt","毛衣":"sweater","外套":"jacket","大衣":"coat","西裝":"suit",
+    "褲子":"pants","長褲":"trousers","短褲":"shorts","牛仔褲":"jeans","休閒褲":"casual pants",
+    "鞋子":"shoes","靴子":"boots","運動鞋":"sneakers","高跟鞋":"high heels","涼鞋":"sandals",
+    "帽子":"hat","眼鏡":"glasses","項鍊":"necklace","手錶":"watch","包包":"bag","圍巾":"scarf","背帶褲":"suspenders"
+}
+
+def zh_lookup(token, table): return table.get(token, token)
+def normalize_color_text(text):
+    if not text: return text
+    for zh, en in ZH2EN_COLOR.items(): text = re.sub(zh, en, text)
+    return text
+def normalize_piece(token):
+    for tb in (ZH2EN_HAIR, ZH2EN_EYES, ZH2EN_BODY, ZH2EN_AGE, ZH2EN_SPECIES, ZH2EN_CLOTHING, ZH2EN_COLOR):
+        if token in tb: return tb[token]
+    return token
+
+# ---------- 角色藍圖（Anchor Card） ----------
+def parse_anchor_from_text(text):
+    """
+    支援快速片段：視覺/性格/行為/口頭禪/標誌物（任一或多項）
+    例：
+    角色設定：視覺=棕色頭髮、藍色背帶褲；性格=勇敢、好奇；行為=喜歡幫助朋友；口頭禪=出發！；標誌物=紅色小恐龍玩偶
+    """
+    anchor = {}
+    # 視覺（自由文字也可）
+    vis_m = re.search(r"(視覺|外觀|長相|穿著|外型)\s*[:=：]\s*([^\n；;]+)", text)
+    if vis_m:
+        vis = normalize_color_text(vis_m.group(2))
+        # 嘗試把常見中文詞轉英
+        tokens = re.split(r"[、,，\s]+", vis)
+        vis_en = ", ".join([normalize_piece(t.strip()) for t in tokens if t.strip()])
+        anchor["visual"] = vis_en or vis
+
+    # 性格
+    per_m = re.search(r"(性格|個性)\s*[:=：]\s*([^\n；;]+)", text)
+    if per_m:
+        anchor["personality"] = per_m.group(2).strip()
+
+    # 行為模式
+    beh_m = re.search(r"(行為|行為模式|習慣)\s*[:=：]\s*([^\n；;]+)", text)
+    if beh_m:
+        anchor["behavior"] = beh_m.group(2).strip()
+
+    # 口頭禪
+    catch_m = re.search(r"(口頭禪|口頭語)\s*[:=：]\s*([^\n；;]+)", text)
+    if catch_m:
+        anchor["catchphrase"] = catch_m.group(2).strip()
+
+    # 標誌物/隨身物
+    sig_m = re.search(r"(標誌物|隨身物|道具|物件)\s*[:=：]\s*([^\n；;]+)", text)
+    if sig_m:
+        anchor["signature_item"] = normalize_color_text(sig_m.group(2)).strip()
+
+    return anchor
+
+def autogen_anchor_from_brief(brief):
+    """
+    簡述 → 產生完整 Anchor Card（JSON）
+    """
+    sysmsg = ("你是資深兒童繪本編輯。請將使用者提供的角色簡述，補全為完整設定，"
+              "包含 keys: visual(英文短語，頭髮/眼睛/穿著/顏色/特殊標記)、"
+              "personality(條列詞或短語)、behavior(平常喜歡做的事/反應模式)、"
+              "catchphrase(口頭禪)、signature_item(標誌物)。只輸出 JSON。")
+    res = _chat([{"role":"system","content":sysmsg},{"role":"user","content":brief}], temperature=0.2)
+    try:
+        data = json.loads(res)
+        # 視覺內詞彙正規化
+        if "visual" in data and isinstance(data["visual"], str):
+            toks = [t.strip() for t in re.split(r"[、,，/;；]+", data["visual"]) if t.strip()]
+            data["visual"] = ", ".join([normalize_piece(normalize_color_text(t)) for t in toks])
+        return data
+    except Exception:
+        # 後備
+        return {
+            "visual": "brown hair, round eyes, blue suspenders, casual outfit",
+            "personality": "brave, curious, kind",
+            "behavior": "helps friends, explores new places",
+            "catchphrase": "Let's go!",
+            "signature_item": "small red dinosaur plush"
+        }
+
+def ensure_anchor(user_id):
+    """從記憶或Firestore取回；沒有就空卡"""
+    if user_id in user_anchor_cards and user_anchor_cards[user_id]:
+        return user_anchor_cards[user_id]
+    loaded = load_anchor(user_id)
+    if loaded:
+        user_anchor_cards[user_id] = loaded
+        return loaded
+    # 初始空卡
+    user_anchor_cards[user_id] = {
+        "ANCHOR_ID": uuid.uuid4().hex[:6],
+        "visual": "",
+        "personality": "",
+        "behavior": "",
+        "catchphrase": "",
+        "signature_item": ""
     }
-    
-    for category, pattern in clothing_patterns.items():
-        matches = re.findall(pattern, text)
-        if matches:
-            features[category] = matches[0]
-    
-    # 顏色特徵
-    color_patterns = {
-        "主要顏色": r"(灰色|黑色|白色|紅色|藍色|綠色|黃色|粉色|紫色|橙色|棕色)",
-        "服裝顏色": r"(穿|戴|著)(灰色|黑色|白色|紅色|藍色|綠色|黃色|粉色|紫色|橙色|棕色)",
-        "頭髮顏色": r"(頭髮|髮色)(是|為|為|的)(灰色|黑色|白色|紅色|藍色|綠色|黃色|粉色|紫色|橙色|棕色)"
-    }
-    
-    for category, pattern in color_patterns.items():
-        matches = re.findall(pattern, text)
-        if matches:
-            features[category] = matches[0]
-    
-    # 外貌特徵
-    if re.search(r"(長髮|短髮|捲髮|直髮|馬尾|辮子)", text):
-        features["髮型"] = re.search(r"(長髮|短髮|捲髮|直髮|馬尾|辮子)", text).group(1)
-    
-    if re.search(r"(大眼睛|小眼睛|圓眼|鳳眼|單眼皮|雙眼皮)", text):
-        features["眼型"] = re.search(r"(大眼睛|小眼睛|圓眼|鳳眼|單眼皮|雙眼皮)", text).group(1)
-    
-    if re.search(r"(高|矮|胖|瘦|壯|嬌小|苗條)", text):
-        features["體型"] = re.search(r"(高|矮|胖|瘦|壯|嬌小|苗條)", text).group(1)
-    
-    if re.search(r"(年輕|老|中年|小孩|大人|青少年)", text):
-        features["年齡"] = re.search(r"(年輕|老|中年|小孩|大人|青少年)", text).group(1)
-    
-    # 特殊特徵
-    if re.search(r"(動物|貓|狗|鳥|魚|龍|精靈|機器人|外星人)", text):
-        features["物種"] = re.search(r"(動物|貓|狗|鳥|魚|龍|精靈|機器人|外星人)", text).group(1)
-    
-    if re.search(r"(魔法|超能力|特殊能力|技能)", text):
-        features["能力"] = re.search(r"(魔法|超能力|特殊能力|技能)", text).group(1)
-    
-    return features
+    save_anchor(user_id, user_anchor_cards[user_id])
+    return user_anchor_cards[user_id]
 
-def update_character_card(user_id, text):
-    """動態更新角色卡，支援任何類型的角色"""
-    if user_id not in user_character_cards:
-        user_character_cards[user_id] = {}
-    
-    # 提取新特徵
-    new_features = extract_character_features(text)
-    
-    # 更新角色卡
-    if new_features:
-        user_character_cards[user_id].update(new_features)
-        
-        # 生成角色描述
-        character_desc = build_character_description(user_character_cards[user_id])
-        user_character_cards[user_id]["description"] = character_desc
-        
-        print(f"✨ 角色卡已更新: {character_desc[:100]}...")
-        return True
-    
-    return False
+def merge_anchor(user_id, patch):
+    card = ensure_anchor(user_id)
+    for k,v in (patch or {}).items():
+        if v: card[k] = v
+    if "ANCHOR_ID" not in card or not card["ANCHOR_ID"]:
+        card["ANCHOR_ID"] = uuid.uuid4().hex[:6]
+    user_anchor_cards[user_id] = card
+    save_anchor(user_id, card)
+    return card
 
-def build_character_description(features):
-    """根據特徵建立角色描述"""
-    parts = []
-    
-    # 基本描述
-    if "物種" in features:
-        parts.append(f"A {features['物種']}")
-    else:
-        parts.append("A person")
-    
-    # 外貌特徵
-    if "年齡" in features:
-        parts.append(f"who is {features['年齡']}")
-    
-    if "體型" in features:
-        parts.append(f"with a {features['體型']} build")
-    
-    if "髮型" in features:
-        parts.append(f"having {features['髮型']}")
-    
-    if "眼型" in features:
-        parts.append(f"with {features['眼型']}")
-    
-    # 服裝特徵
-    clothing_parts = []
-    if "裙子" in features:
-        clothing_parts.append(f"wearing a {features['裙子']}")
-    if "上衣" in features:
-        clothing_parts.append(f"in a {features['上衣']}")
-    if "褲子" in features:
-        clothing_parts.append(f"with {features['褲子']}")
-    
-    if clothing_parts:
-        parts.append(", ".join(clothing_parts))
-    
-    # 顏色特徵
-    if "主要顏色" in features:
-        parts.append(f"in {features['主要顏色']} color")
-    
-    # 能力特徵
-    if "能力" in features:
-        parts.append(f"with {features['能力']}")
-    
-    # 組合描述
-    description = " ".join(parts) + "."
-    
-    # 添加一致性要求
-    description += " Maintain consistent appearance across all images: same face, hairstyle, clothing, colors, and proportions."
-    
-    return description
-
-def get_character_prompt(user_id):
-    """獲取角色 prompt"""
-    if user_id in user_character_cards and "description" in user_character_cards[user_id]:
-        return user_character_cards[user_id]["description"]
-    return "Main character with unique features. Maintain consistent appearance across all images."
+def anchor_text(card):
+    """
+    產出可重複注入的「身份證」+ 硬約束（供圖像/文字 prompt 前綴）
+    """
+    aid = card.get("ANCHOR_ID","????")
+    visual = card.get("visual","human, long hair, large eyes, simple outfit")
+    personality = card.get("personality","kind, curious")
+    behavior = card.get("behavior","helps others")
+    catch = card.get("catchphrase","")
+    sig = card.get("signature_item","")
+    # CHARACTER BIBLE + ANCHOR token（重覆兩次以強化注意力）
+    base = [
+        f"ANCHOR::{aid}",
+        f"CHARACTER BIBLE (DO NOT CHANGE): Main character visual: {visual}.",
+        "Keep face, hairstyle (length/shape), outfit items, color palette, and body proportions CONSISTENT in all images.",
+        "Do NOT change age/gender/ethnicity/hairstyle/outfit/colors unless explicitly instructed.",
+    ]
+    if sig: base.append(f"Signature item: {sig}. Ensure it appears when appropriate.")
+    # 附人格與行為（生成文字時更有幫助；圖像模型通常忽略，但保留無害）
+    base += [
+        f"PERSONALITY: {personality}.",
+        f"BEHAVIOR: {behavior}.",
+    ]
+    if catch: base.append(f"CATCHPHRASE: \"{catch}\".")
+    base.append(f"ANCHOR::{aid}")
+    return "\n".join(base)
 
 # ---------- 場景分析 ----------
 def analyze_scene(paragraph, user_id):
-    """分析場景，支援任何類型的場景"""
-    world_context = user_story_contexts.get(user_id, {})
-    
-    # 基礎場景分析
     scene = {
         "setting": "general location",
         "time_of_day": "day",
@@ -287,71 +329,51 @@ def analyze_scene(paragraph, user_id):
         "interaction": "interacting with surroundings",
         "key_objects": ""
     }
-    
-    # 智能場景識別
-    if re.search(r"(森林|樹林|公園|花園)", paragraph):
-        scene["setting"] = "forest/nature"
-    elif re.search(r"(城市|街道|大樓|商店)", paragraph):
-        scene["setting"] = "urban/city"
-    elif re.search(r"(家裡|房間|廚房|客廳)", paragraph):
-        scene["setting"] = "home/indoor"
-    elif re.search(r"(學校|教室|操場|圖書館)", paragraph):
-        scene["setting"] = "school/educational"
-    
-    if re.search(r"(夜晚|晚上|深夜|月光)", paragraph):
-        scene["time_of_day"] = "night"
-    elif re.search(r"(早晨|早上|日出|黃昏)", paragraph):
-        scene["time_of_day"] = "morning/sunset"
-    
-    if re.search(r"(快樂|開心|興奮|歡樂)", paragraph):
-        scene["mood"] = "happy/joyful"
-    elif re.search(r"(悲傷|難過|憂鬱|緊張)", paragraph):
-        scene["mood"] = "sad/melancholy"
-    elif re.search(r"(神秘|奇幻|冒險|刺激)", paragraph):
-        scene["mood"] = "mysterious/adventurous"
-    
+    if re.search(r"(森林|樹林|公園|花園)", paragraph): scene["setting"] = "forest/nature"
+    elif re.search(r"(城市|街道|大樓|商店)", paragraph): scene["setting"] = "urban/city"
+    elif re.search(r"(家裡|房間|廚房|客廳)", paragraph): scene["setting"] = "home/indoor"
+    elif re.search(r"(學校|教室|操場|圖書館)", paragraph): scene["setting"] = "school/educational"
+
+    if re.search(r"(夜晚|晚上|深夜|月光)", paragraph): scene["time_of_day"] = "night"
+    elif re.search(r"(早晨|早上|日出|黃昏)", paragraph): scene["time_of_day"] = "morning/sunset"
+
+    if re.search(r"(快樂|開心|興奮|歡樂)", paragraph): scene["mood"] = "happy/joyful"
+    elif re.search(r"(悲傷|難過|憂鬱|緊張)", paragraph): scene["mood"] = "sad/melancholy"
+    elif re.search(r"(神秘|奇幻|冒險|刺激)", paragraph): scene["mood"] = "mysterious/adventurous"
+
     return scene
 
-# ---------- 圖像 Prompt 生成 ----------
+# ---------- 圖像 Prompt（內建錨定） ----------
 def build_image_prompt(user_id, scene, user_extra_desc=""):
-    """生成開放的圖像 prompt，支援任何類型的角色和場景"""
-    
-    # 基礎角色描述
-    character_base = get_character_prompt(user_id)
-    
-    # 風格指導 - 確保插畫風格
-    style_guide = (
-        "Beautiful, detailed illustration in watercolor style. Full scene composition. "
-        "Avoid text, letters, words, captions, subtitles, watermark, signature. "
-        "Show environment and story action. High quality, artistic illustration."
+    card = ensure_anchor(user_id)
+    anchor = anchor_text(card)
+    style_guard = (
+        "STYLE: storybook watercolor illustration, wholesome, family-friendly. "
+        "COMPOSITION: full scene with environment and action; avoid plain white background; avoid isolated headshots."
     )
-    
-    # 場景描述
     scene_desc = (
-        f"Setting: {scene.get('setting', 'general location')}, "
-        f"Time: {scene.get('time_of_day', 'day')}, "
-        f"Mood: {scene.get('mood', 'neutral')}, "
-        f"Action: {scene.get('main_action', 'performing an action')}, "
-        f"Background: {scene.get('background', 'environmental elements')}"
+        f"SCENE: setting={scene.get('setting','general location')}, "
+        f"time_of_day={scene.get('time_of_day','day')}, "
+        f"mood={scene.get('mood','neutral')}, "
+        f"foreground action={scene.get('main_action','performing an action')}, "
+        f"background={scene.get('background','environment')}, "
+        f"interaction={scene.get('interaction','natural interaction')}, "
+        f"key_objects={scene.get('key_objects','none')}."
     )
-    
-    # 組合 prompt - 角色描述放在最前面，確保優先級
-    parts = [character_base, style_guide, scene_desc]
+    parts = [anchor, style_guard, scene_desc]
     if user_extra_desc:
-        parts.append(f"User requirements: {user_extra_desc}")
-    
+        parts.append(f"USER ADDITIONS: {user_extra_desc}")
     prompt = " ".join(parts)
-    
-    # 負面 prompt - 加強角色一致性要求
+
     negative = (
         "text, letters, words, captions, subtitles, watermark, signature, "
-        "low quality, blurry, different character, change hairstyle, change outfit, "
-        "age change, gender change, inconsistent appearance"
+        "plain studio white background, poster layout, close-up headshot only, "
+        "different character, different face, different hairstyle, different outfit, different colors, "
+        "age change, gender change, extra characters, multiple versions of the main character"
     )
-    
     return prompt, negative
 
-# ---------- Leonardo AI ----------
+# ---------- Leonardo API ----------
 def leonardo_headers():
     return {
         "Authorization": f"Bearer {LEONARDO_API_KEY.strip()}",
@@ -368,7 +390,7 @@ def leonardo_tti(payload):
     data = r.json()
     return data["sdGenerationJob"]["generationId"]
 
-def leonardo_poll(gen_id, timeout=150):
+def leonardo_poll(gen_id, timeout=180):
     url = f"{LEO_BASE}/generations/{gen_id}"
     start = time.time()
     while time.time()-start < timeout:
@@ -380,7 +402,6 @@ def leonardo_poll(gen_id, timeout=150):
                 continue
             r.raise_for_status()
             data = r.json()
-            
             if data.get("generations_by_pk"):
                 generation_data = data["generations_by_pk"]
                 status = generation_data.get("status")
@@ -397,11 +418,9 @@ def leonardo_poll(gen_id, timeout=150):
                     return None, None
             else:
                 print(f"⚠️ 回應格式異常: {data}")
-                
         except Exception as e:
             print(f"❌ 檢查狀態時發生錯誤: {e}")
             traceback.print_exc()
-            
     print(f"⏰ 輪詢超時 ({timeout}s)，生成 ID: {gen_id}")
     return None, None
 
@@ -411,29 +430,23 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
         "prompt": prompt[:1500],
         "num_images": 1,
         "width": IMG_W, "height": IMG_H,
-        "contrast": 3.0,
         "ultra": False,
         "enhancePrompt": False,
         "negative_prompt": negative_prompt,
         "seed": int(seed)
     }
-    
-    # Image-to-Image 參數
-    if init_image_id and init_strength:
+    if init_image_id and init_strength is not None:
         payload["init_image_id"] = init_image_id
         payload["init_strength"] = float(init_strength)
 
-    print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
-    
+    print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False)[:1000])
     try:
         gen_id = leonardo_tti(payload)
         print("✅ Leonardo Generation ID:", gen_id)
-        
         url, image_id = leonardo_poll(gen_id)
         if url:
             gcs_url = upload_to_gcs_from_url(url, user_id, prompt)
             return {"url": gcs_url, "image_id": image_id}
-            
     except requests.HTTPError as e:
         if init_image_id and "Unexpected variable" in str(e):
             print("↩️ 自動降級：改用 text-to-image 重試")
@@ -462,15 +475,12 @@ def format_reply(text):
 def natural_guidance(last_user_text):
     brief = last_user_text if len(last_user_text) <= 40 else last_user_text[:40] + "…"
     asks = []
-    
-    # 開放式引導，不預設任何特定內容
-    if not re.search(r"(叫|名|主角|角色)", last_user_text):
-        asks.append("主角或角色是什麼呢？")
+    if not re.search(r"(叫|名|主角|角色|設定)", last_user_text):
+        asks.append("先告訴我主角外觀與穿著？")
     if not re.search(r"(在哪|哪裡|什麼地方|場景)", last_user_text):
         asks.append("這段發生在哪裡呢？")
     if not re.search(r"(做什麼|發生|遇到|準備|解決)", last_user_text):
         asks.append("這段想發生什麼事情呢？")
-    
     if not asks: asks = ["想再加哪個小細節？"]
     return f"我聽到了：{brief}\n很有畫面感！\n{asks[0]}"
 
@@ -495,26 +505,25 @@ def callback():
 # ---------- 狀態工具 ----------
 def reset_session(user_id):
     user_sessions[user_id] = {"messages": [], "story_mode": True, "summary": "", "paras": []}
-    user_character_cards[user_id] = {} # 重置角色卡
-    user_story_contexts[user_id] = {}
+    user_last_images[user_id] = {}
     user_seeds[user_id] = random.randint(100000, 999999)
+    # Anchor 優先載入（保留跨章記憶）
+    ensure_anchor(user_id)
     print(f"✅ Reset session for {user_id}, seed={user_seeds[user_id]}")
 
 # ---------- 背景任務 ----------
 GEN_SEMAPHORE = threading.Semaphore(2)
 
 def bg_generate_and_push_draw(user_id, n, extra_desc):
-    """背景生成第 n 段插圖"""
+    """背景生成第 n 段插圖（先定妝→全程 i2i；每次 prompt 注入 ANCHOR）"""
     with GEN_SEMAPHORE:
         try:
             sess = user_sessions.setdefault(user_id, {"messages": [], "story_mode": True, "summary": "", "paras": []})
-            
-            # 載入或生成故事段落
+            # 段落
             paras = load_latest_story_paragraphs(user_id) or sess.get("paras") or []
             if not paras:
-                # 智能提取故事內容
                 story_user_texts = [m["content"] for m in sess["messages"]
-                                    if m.get("role")=="user" and not re.search(r"(幫我畫|請畫|畫|整理|總結|定妝)", m.get("content",""))]
+                                    if m.get("role")=="user" and not re.search(r"(幫我畫|請畫|畫|整理|總結|定妝|角色設定|更新角色)", m.get("content",""))]
                 if story_user_texts:
                     compact_msgs = [{"role":"user","content":"\n".join(story_user_texts[-8:])}]
                     summary = generate_story_summary(compact_msgs)
@@ -527,41 +536,54 @@ def bg_generate_and_push_draw(user_id, n, extra_desc):
                 line_bot_api.push_message(user_id, TextSendMessage("資訊不足，這段再給我一些細節好嗎？"))
                 return
 
-            # 分析場景
             scene = analyze_scene(paras[n], user_id)
-            
-            # 生成 prompt
-            prompt, neg = build_image_prompt(user_id, scene, extra_desc)
-            
-            # 決定是否使用 Image-to-Image
+
+            # 若沒有定妝參考，先自動定妝一次
             last_image = user_last_images.get(user_id, {})
             ref_id = last_image.get("image_id")
             seed = user_seeds.setdefault(user_id, random.randint(100000,999999))
-            
-            # 智能決定是否使用 Image-to-Image
-            # 第一段不用，後續如果有角色卡且不是第一次畫圖就用
-            use_init = bool(ref_id and n > 0 and user_character_cards.get(user_id, {}).get("description"))
-            
-            print(f"🎨 生成第 {n+1} 段插圖")
-            print(f"👤 角色卡: {get_character_prompt(user_id)[:100]}...")
-            print(f"🖼️ 使用 Image-to-Image: {use_init}")
-            if use_init:
-                print(f"🔗 參考圖片 ID: {ref_id}")
+
+            if not ref_id:
+                portrait_prompt = anchor_text(ensure_anchor(user_id)) + \
+                    " Full body character portrait, neutral pose, clear outfit and colors. Watercolor illustration."
+                result0 = generate_leonardo_image(
+                    user_id=user_id, prompt=portrait_prompt,
+                    negative_prompt="text, letters, words, captions, subtitles, watermark, signature, plain studio background",
+                    seed=seed
+                )
+                if result0 and result0["url"]:
+                    user_last_images[user_id] = {"url": result0["url"], "image_id": result0["image_id"]}
+                    ref_id = result0["image_id"]
+                    try:
+                        line_bot_api.push_message(user_id, TextSendMessage("先完成定妝照，接著依此一致性來畫分鏡～"))
+                    except Exception:
+                        pass
+                else:
+                    line_bot_api.push_message(user_id, TextSendMessage("定妝未成功，請再描述角色外觀或輸入「定妝」重試。"))
+                    return
+
+            # 生圖（固定 i2i，除非 extra 說換裝）
+            prompt, neg = build_image_prompt(user_id, scene, extra_desc)
+            use_init = True
+            init_strength = 0.26
+            if re.search(r"(換裝|換衣|改髮|改色|change outfit|new look)", (extra_desc or ""), flags=re.I):
+                use_init = False  # 或降 0.12
+
+            print(f"🎨 生成第 {n+1} 段 / i2i={use_init} / init_strength={init_strength if use_init else None}")
+            print(f"🔗 ANCHOR 注入: {ensure_anchor(user_id).get('ANCHOR_ID')}")
 
             result = generate_leonardo_image(
                 user_id=user_id, prompt=prompt, negative_prompt=neg,
-                seed=seed, init_image_id=(ref_id if use_init else None), 
-                init_strength=(0.3 if use_init else None)  # 提高強度確保一致性
+                seed=seed,
+                init_image_id=(user_last_images[user_id]["image_id"] if use_init else None),
+                init_strength=(init_strength if use_init else None)
             )
-            
+
             if result and result["url"]:
-                # 更新最後一張圖片
                 user_last_images[user_id] = {
                     "url": result["url"],
-                    "image_id": result.get("image_id", ref_id) or ref_id
+                    "image_id": result.get("image_id", user_last_images[user_id].get("image_id"))
                 }
-                
-                # 推送到 LINE
                 line_bot_api.push_message(user_id, [
                     TextSendMessage(f"第 {n+1} 段完成了！"),
                     ImageSendMessage(result["url"], result["url"])
@@ -569,7 +591,7 @@ def bg_generate_and_push_draw(user_id, n, extra_desc):
                 save_chat(user_id, "assistant", f"[image]{result['url']}")
             else:
                 line_bot_api.push_message(user_id, TextSendMessage("這段暫時畫不出來，再補充一點動作或場景試試？"))
-                
+
         except Exception as e:
             print("❌ 背景生成失敗：", e)
             traceback.print_exc()
@@ -579,28 +601,20 @@ def bg_generate_and_push_draw(user_id, n, extra_desc):
                 pass
 
 def bg_generate_and_push_portrait(user_id):
-    """背景生成角色定妝照"""
+    """背景生成角色定妝照（Anchor Card + 全身）"""
     with GEN_SEMAPHORE:
         try:
-            # 使用現有角色卡或建立基礎角色卡
-            character_desc = get_character_prompt(user_id)
+            ensure_anchor(user_id)
             seed = user_seeds.setdefault(user_id, random.randint(100000,999999))
-            
-            prompt = character_desc + " Beautiful, detailed character portrait. Full body shot."
+            prompt = anchor_text(user_anchor_cards[user_id]) + \
+                     " Full body character portrait, neutral pose, clear outfit and colors. Watercolor illustration."
             result = generate_leonardo_image(
                 user_id=user_id, prompt=prompt,
-                negative_prompt="text, letters, words, captions, subtitles, watermark, signature",
+                negative_prompt="text, letters, words, captions, subtitles, watermark, signature, plain studio background",
                 seed=seed
             )
-            
             if result and result["url"]:
-                # 更新最後一張圖片
-                user_last_images[user_id] = {
-                    "url": result["url"],
-                    "image_id": result["image_id"]
-                }
-                
-                # 推送到 LINE
+                user_last_images[user_id] = {"url": result["url"], "image_id": result["image_id"]}
                 line_bot_api.push_message(user_id, [
                     TextSendMessage("角色定妝照完成囉～之後會以此為基準！"),
                     ImageSendMessage(result["url"], result["url"])
@@ -608,7 +622,6 @@ def bg_generate_and_push_portrait(user_id):
                 save_chat(user_id, "assistant", f"[image]{result['url']}")
             else:
                 line_bot_api.push_message(user_id, TextSendMessage("定妝照暫時失敗，再試一次？"))
-                
         except Exception as e:
             print("❌ 背景定妝失敗：", e)
             traceback.print_exc()
@@ -629,21 +642,63 @@ def handle_message(event):
         # 啟動
         if re.search(r"(開始說故事|說故事|講個故事|一起來講故事吧|我們來講故事吧)", text):
             reset_session(user_id)
-            line_bot_api.reply_message(reply_token, TextSendMessage("太好了！先說主角與地點吧？"))
+            msg = ("先幫主角建『角色藍圖』：\n"
+                   "可直接貼：\n"
+                   "角色設定：視覺=（髮色/眼色/穿著/顏色/特殊標記）；\n"
+                   "性格=（內向/勇敢…）；\n"
+                   "行為=（喜歡做…/遇事會…）；\n"
+                   "口頭禪=（…）；\n"
+                   "標誌物=（隨身物）。\n\n"
+                   "或直接打一段簡述，我幫你自動補全。")
+            line_bot_api.reply_message(reply_token, TextSendMessage(msg))
             return
 
+        # 儲對話
         sess = user_sessions.setdefault(user_id, {"messages": [], "story_mode": True, "summary": "", "paras": []})
         sess["messages"].append({"role":"user","content":text})
         if len(sess["messages"]) > 60: sess["messages"] = sess["messages"][-60:]
         save_chat(user_id, "user", text)
 
-        # 智能角色特徵提取和更新
-        if update_character_card(user_id, text):
-            print(f"✨ 角色卡已更新: {user_character_cards[user_id]['description'][:100]}...")
+        # 角色設定（手動全或部分）
+        if text.startswith("角色設定"):
+            patch = parse_anchor_from_text(text)
+            if not patch:
+                # 當作簡述自動補全
+                brief = re.sub(r"^角色設定[:：]?\s*","",text)
+                patch = autogen_anchor_from_brief(brief or "A brave, curious child in blue suspenders with a red dinosaur plush.")
+            card = merge_anchor(user_id, patch)
+            msg = (f"✅ 已建立/更新角色藍圖（ANCHOR {card['ANCHOR_ID']}）：\n"
+                   f"視覺：{card.get('visual','')}\n性格：{card.get('personality','')}\n"
+                   f"行為：{card.get('behavior','')}\n口頭禪：{card.get('catchphrase','')}\n標誌物：{card.get('signature_item','')}\n\n"
+                   "輸入「定妝」可先做基準照；或直接說故事，我會在每張圖自動錨定。")
+            line_bot_api.reply_message(reply_token, TextSendMessage(msg))
+            return
 
-        # 整理 / 總結
+        # 局部更新
+        if text.startswith("更新角色"):
+            patch = parse_anchor_from_text(text)
+            if patch:
+                card = merge_anchor(user_id, patch)
+                line_bot_api.reply_message(reply_token, TextSendMessage(f"✅ 已更新角色藍圖（ANCHOR {card['ANCHOR_ID']}）"))
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage("請用：更新角色：性格=…；行為=…；口頭禪=…；視覺=…；標誌物=…"))
+            return
+
+        # 查看角色藍圖
+        if re.search(r"(角色卡|角色藍圖|查看角色)", text):
+            card = ensure_anchor(user_id)
+            msg = (f"📋 角色藍圖（ANCHOR {card['ANCHOR_ID']}）\n"
+                   f"視覺：{card.get('visual','')}\n性格：{card.get('personality','')}\n"
+                   f"行為：{card.get('behavior','')}\n口頭禪：{card.get('catchphrase','')}\n標誌物：{card.get('signature_item','')}")
+            line_bot_api.reply_message(reply_token, TextSendMessage(msg))
+            return
+
+        # 整理 / 總結（產出五段）
         if re.search(r"(整理|總結|summary)", text):
             msgs = [{"role":"system","content":base_system_prompt}] + sess["messages"][-40:]
+            # 在摘要中也注入錨定，讓文本故事一致
+            anchor_intro = anchor_text(ensure_anchor(user_id))
+            msgs.insert(1, {"role":"user","content":"請貫徹以下角色設定與錨定：\n" + anchor_intro})
             summary = generate_story_summary(msgs)
             sess["summary"] = summary
             paras = extract_paragraphs(summary)
@@ -659,23 +714,9 @@ def handle_message(event):
 
         # 定妝
         if "定妝" in text:
+            ensure_anchor(user_id)
             line_bot_api.reply_message(reply_token, TextSendMessage("收到，我先做定妝照，畫好就傳給你～"))
             threading.Thread(target=bg_generate_and_push_portrait, args=(user_id,), daemon=True).start()
-            return
-
-        # 查看角色卡
-        if "角色卡" in text or "查看角色" in text:
-            if user_id in user_character_cards and user_character_cards[user_id]:
-                character_info = user_character_cards[user_id]
-                response = "📋 當前角色卡：\n"
-                for key, value in character_info.items():
-                    if key != "description":
-                        response += f"• {key}: {value}\n"
-                if "description" in character_info:
-                    response += f"\n🎨 完整描述：\n{character_info['description']}"
-            else:
-                response = "還沒有建立角色卡，請先描述一下角色特徵吧！"
-            line_bot_api.reply_message(reply_token, TextSendMessage(response))
             return
 
         # 畫第 N 段
@@ -686,11 +727,11 @@ def handle_message(event):
             n = idx_map.get(m.group(0),1) - 1
             extra = re.sub(draw_pat, "", text).strip(" ，,。.!！")
 
-            # 先確保有故事段落
+            # 確保有段落
             paras = load_latest_story_paragraphs(user_id)
             if not paras:
                 story_user_texts = [m["content"] for m in sess["messages"]
-                                    if m.get("role")=="user" and not re.search(r"(幫我畫|請畫|畫|整理|總結|定妝)", m.get("content",""))]
+                                    if m.get("role")=="user" and not re.search(r"(幫我畫|請畫|畫|整理|總結|定妝|角色設定|更新角色)", m.get("content",""))]
                 if story_user_texts:
                     compact_msgs = [{"role":"user","content":"\n".join(story_user_texts[-8:])}]
                     summary = generate_story_summary(compact_msgs)
