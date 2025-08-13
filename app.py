@@ -133,33 +133,68 @@ _init_openai()
 
 def openai_images_generate(prompt: str, size: str = "1024x1024"):
     """
-    對 gpt-image-1 下圖；回傳 bytes（PNG）或 None；包含詳盡日誌。
+    對 gpt-image-1 下圖；相容不同回傳型態（b64_json 或 url）。
+    不再傳 response_format，避免 400 Unknown parameter。
+    回傳 bytes（PNG）或 None。
     """
     try:
         t0 = time.time()
         log.info("🖼️ images.generate start | size=%s | prompt_len=%d", size, len(prompt))
+
         if _openai_mode == "sdk1":
+            # 不帶 response_format，讓伺服器決定；我們之後同時支援 b64_json 與 url
             resp = _oai_client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
                 size=size,
-                response_format="b64_json",
             )
-            b64 = resp.data[0].b64_json
+            datum = resp.data[0]
+            img_bytes = None
+
+            # 先嘗試 b64_json
+            b64 = getattr(datum, "b64_json", None)
+            if b64:
+                import base64
+                img_bytes = base64.b64decode(b64)
+            else:
+                # 再嘗試 url
+                url = getattr(datum, "url", None)
+                if url:
+                    r = requests.get(url, timeout=120)
+                    r.raise_for_status()
+                    img_bytes = r.content
+
         else:
+            # legacy openai 套件
             resp = _oai_client.Image.create(
                 prompt=prompt,
                 size=size,
-                response_format="b64_json",
                 model="gpt-image-1",
             )
-            b64 = resp["data"][0]["b64_json"]
+            img_bytes = None
+            d0 = resp["data"][0]
 
-        import base64
-        out = base64.b64decode(b64)
+            # 先嘗試 b64_json
+            b64 = d0.get("b64_json")
+            if b64:
+                import base64
+                img_bytes = base64.b64decode(b64)
+            else:
+                # 再嘗試 url
+                url = d0.get("url")
+                if url:
+                    r = requests.get(url, timeout=120)
+                    r.raise_for_status()
+                    img_bytes = r.content
+
+        if not img_bytes:
+            log.error("💥 images.generate: no image content in response (neither b64_json nor url).")
+            return None
+
         log.info("🖼️ images.generate ok | ms=%d | bytes=%d",
-                 int((time.time()-t0)*1000), len(out))
-        return out
+                 int((time.time()-t0)*1000), len(img_bytes))
+        return img_bytes
+
     except Exception as e:
         status = getattr(e, "status_code", None) or getattr(e, "http_status", None)
         body   = getattr(e, "response", None)
@@ -175,6 +210,7 @@ def openai_images_generate(prompt: str, size: str = "1024x1024"):
         log.error("💥 images.generate error | status=%s | msg=%s", status, str(e))
         if text: log.error("💥 images.generate body | %s", text)
         return None
+
 
 # =============== 會話記憶（簡化） ===============
 user_sessions = {}      # {uid: {"messages":[...], "paras":[...]}}
