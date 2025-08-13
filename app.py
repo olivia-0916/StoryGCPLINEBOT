@@ -1,6 +1,7 @@
 # app.py — LINE 故事繪本機器人
+# - OpenAI 相容式導入（避免不同 1.x 小版造成匯入錯誤）
 # - gpt-image-1 完整錯誤輸出（403/安全攔截等）
-# - GCS 只用 V4 簽名網址（相容 Uniform bucket-level access）
+# - GCS 只用 V4 簽名網址（相容 Uniform bucket-level access / PAP）
 # - Slot 抽取與欄位填充：只追問缺的資訊，避免重複提問
 # - 故事整理切 5 段 + 隱藏參考圖 + 角色一致性
 
@@ -18,9 +19,33 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
-# ---------- OpenAI 1.x ----------
-from openai import OpenAI
-from openai import APIStatusError, APIConnectionError, RateLimitError, AuthenticationError, BadRequestError
+# ---------- OpenAI 1.x（相容式導入） ----------
+import openai as _openai_mod
+
+OpenAI = _openai_mod.OpenAI  # 客戶端
+
+def _pick(*names, default=Exception):
+    """從 openai 模組或 openai._exceptions 里拿例外類別；取不到回傳 default。"""
+    for n in names:
+        obj = getattr(_openai_mod, n, None)
+        if obj:
+            return obj
+    try:
+        exc_mod = __import__("openai._exceptions", fromlist=["*"])
+        for n in names:
+            obj = getattr(exc_mod, n, None)
+            if obj:
+                return obj
+    except Exception:
+        pass
+    return default
+
+APIStatusError        = _pick("APIStatusError", "APIError")
+APIConnectionError    = _pick("APIConnectionError")
+RateLimitError        = _pick("RateLimitError")
+AuthenticationError   = _pick("AuthenticationError")
+BadRequestError       = _pick("BadRequestError")
+PermissionDeniedError = _pick("PermissionDeniedError")
 
 # ---------- Firebase / Firestore / GCS ----------
 import firebase_admin
@@ -204,7 +229,7 @@ def openai_generate(prompt: str, size="1024x1024", retries=1) -> bytes:
             wait = 1.5 * (attempt + 1)
             print(f"🌐 transient error {e.__class__.__name__}, retry in {wait}s")
             time.sleep(wait)
-        except (BadRequestError, APIStatusError, AuthenticationError) as e:
+        except (BadRequestError, APIStatusError, AuthenticationError, PermissionDeniedError) as e:
             _print_api_error("💥 images.generate error", e)
             if isinstance(e, APIStatusError) and getattr(e, "status_code", None) == 403:
                 body = ""
@@ -236,7 +261,7 @@ def openai_img2img(prompt: str, ref_bytes: bytes, size="1024x1024", retries=1) -
             wait = 1.5 * (attempt + 1)
             print(f"🌐 transient error {e.__class__.__name__}, retry in {wait}s")
             time.sleep(wait)
-        except (BadRequestError, APIStatusError, AuthenticationError) as e:
+        except (BadRequestError, APIStatusError, AuthenticationError, PermissionDeniedError) as e:
             _print_api_error("💥 images.edits error", e)
             if isinstance(e, APIStatusError) and getattr(e, "status_code", None) == 403:
                 body = ""
@@ -249,43 +274,38 @@ def openai_img2img(prompt: str, ref_bytes: bytes, size="1024x1024", retries=1) -
             raise
 
 # ================== Slot 抽取與欄位填充 ==================
+SLOT_KEYS = ["character", "appearance", "location", "time", "goal", "conflict", "resolution", "tone"]
+MANDATORY_SLOTS = ["character", "location", "goal"]
+
 def rule_extract_slots(text: str) -> Dict[str, str]:
-    """快速規則抽取，能抓到常見詞；LLM 抽取前的粗標。"""
     slots = {}
     # 角色/外觀
     m = re.search(r"(叫|名為|名字是|他是|她是)([^，。！？,.]{1,12})", text)
     if m: slots["character"] = m.group(2).strip()
     if re.search(r"(短髮|長髮|棕髮|黑髮|金髮|瀏海|馬尾|眼鏡|帽子)", text):
         slots["appearance"] = (slots.get("appearance","") + " " + re.findall(r"(短髮|長髮|棕髮|黑髮|金髮|瀏海|馬尾|眼鏡|帽子)", text)[0]).strip()
-
     # 場景
     loc_kw = re.findall(r"(在|來到|位於)([^。！!？\n]{2,12})(?:[。！!？\n]|$)", text)
     if loc_kw:
         slots["location"] = re.sub(r"^(在|來到|位於)", "", loc_kw[0][0]+loc_kw[0][1]).strip()
-
     # 時間
     if re.search(r"(早上|上午|中午|下午|傍晚|晚上|深夜|黎明|清晨|黃昏)", text):
         slots["time"] = re.findall(r"(早上|上午|中午|下午|傍晚|晚上|深夜|黎明|清晨|黃昏)", text)[0]
-
     # 目標
     m = re.search(r"(想要|希望|目標|為了|打算)([^。！!？\n]{2,20})", text)
     if m: slots["goal"] = m.group(2).strip()
-
     # 衝突
     m = re.search(r"(遇到|面臨|困難|挑戰|危機|阻礙)([^。！!？\n]{2,20})", text)
     if m: slots["conflict"] = m.group(2).strip()
-
     # 結局
     m = re.search(r"(最後|終於|結果|因此)([^。！!？\n]{2,20})", text)
     if m: slots["resolution"] = m.group(2).strip()
-
     # 語氣
     if re.search(r"(溫馨|緊張|感動|歡樂|神秘|冒險|療癒|寫實|童趣)", text):
         slots["tone"] = re.findall(r"(溫馨|緊張|感動|歡樂|神秘|冒險|療癒|寫實|童趣)", text)[0]
     return slots
 
 def llm_extract_slots(text: str) -> Dict[str, str]:
-    """用 LLM 精抽 slot；缺的就空字串。"""
     sysmsg = (
         "Extract story slots from Chinese text and return strict JSON with keys: "
         "character, appearance, location, time, goal, conflict, resolution, tone. "
@@ -306,13 +326,12 @@ def merge_slots(old: Dict[str,str], new: Dict[str,str]) -> Dict[str,str]:
     out = dict(old or {})
     for k in SLOT_KEYS:
         v = (new or {}).get(k)
-        if v and (k not in out or not out[k]):  # 只填補空白欄位；避免覆蓋使用者已定義
+        if v and (k not in out or not out[k]):  # 只填補空白欄位
             out[k] = v
     return out
 
 def format_missing_questions(slots: Dict[str,str]) -> str:
     missing = [k for k in MANDATORY_SLOTS if not slots.get(k)]
-    # 只追問前兩個缺的欄位
     qmap = {
         "character":"主角是誰？外觀如何？",
         "location":"故事在哪裡發生？",
@@ -325,11 +344,9 @@ def format_missing_questions(slots: Dict[str,str]) -> str:
     asks = [qmap[m] for m in missing[:2]]
     if asks:
         return "我先記下了！\n" + " / ".join(asks)
-    # 必要欄位都齊了 → 提示整理
     return "很好！要我把故事整理成 5 段嗎？直接回「整理」即可。"
 
 def slots_to_story_text(slots: Dict[str,str]) -> str:
-    """把 slot 合成一段完整基底故事文本，供分段與生圖使用。"""
     parts = []
     c = slots.get("character"); a=slots.get("appearance"); loc=slots.get("location")
     t = slots.get("time"); g=slots.get("goal"); con=slots.get("conflict")
@@ -350,8 +367,6 @@ def ensure_hidden_reference(story_id: str):
     href  = story.get("hidden_reference_image_url")
     if feats and href:
         return
-
-    # 若 slots 可用，優先拼出文字供角色特徵抽取
     slots = (story.get("slots") or {})
     base_text = story.get("story_text","") or slots_to_story_text(slots)
     if not feats:
@@ -383,7 +398,6 @@ def generate_scene_image(story_id: str, idx: int, extra: str="") -> str:
     feats = story.get("character_features") or extract_features_from_text(base_text)
     save_story(story_id, {"character_features": feats})
 
-    # 嘗試建立隱藏參考圖（失敗不阻斷）
     try:
         ensure_hidden_reference(story_id)
     except Exception as e:
@@ -407,7 +421,6 @@ def generate_scene_image(story_id: str, idx: int, extra: str="") -> str:
         else:
             raise
     except APIStatusError as e:
-        # 安全攔截 → 回退更安全的 prompt
         print("↩️ fallback to safer prompt due to APIStatusError")
         safer = prompt + " Avoid showing specific logos, school names, medical settings, or explicit content."
         img = openai_generate(safer)
@@ -422,7 +435,6 @@ def compact_story_from_dialog(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(user_lines[-12:]).strip()
 
 def summarize_and_store(user_id: str, story_id: str, story_text: str, slots: Dict[str,str]) -> List[str]:
-    # 若 slots 足夠，優先用 slots 組合的文本再加上使用者敘事
     base = slots_to_story_text(slots)
     corpus = (base + "\n" + story_text).strip() if story_text else base
     scenes = split_into_five_scenes(corpus)
@@ -486,7 +498,7 @@ def handle_message(event):
             line_bot_api.reply_message(reply_token, TextSendMessage("好的！自由描述你的故事。\n給完要素後，跟我說「整理」我會切成 5 段。"))
             return
 
-        # 2) 整理 → 分 5 段（同時背景建立隱藏參考）
+        # 2) 整理 → 分 5 段
         if re.search(r"(整理|總結|summary)", text):
             story_id = sess.get("story_id") or f"{user_id}-{uuid.uuid4().hex[:6]}"
             sess["story_id"] = story_id
@@ -513,7 +525,6 @@ def handle_message(event):
                 save_story(story_id, {"user_id": user_id, "created_at": firestore.SERVER_TIMESTAMP, "slots": {}})
 
             story_doc = read_story(story_id) or {}
-            # 若還沒分段，先用目前的 slots + 對話整理
             if not story_doc.get("scenes_text"):
                 base_text = compact_story_from_dialog(sess["messages"])
                 scenes = summarize_and_store(user_id, story_id, base_text, story_doc.get("slots") or {})
@@ -556,7 +567,6 @@ def handle_message(event):
         story_doc = read_story(story_id) or {}
         curr_slots = story_doc.get("slots") or {}
 
-        # 規則先粗抽，再用 LLM 精抽補齊
         rough = rule_extract_slots(text)
         fine  = llm_extract_slots(text)
         merged = merge_slots(curr_slots, merge_slots(rough, fine))
