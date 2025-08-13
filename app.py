@@ -1,10 +1,16 @@
-# app.py — LINE 故事繪本機器人（含 gpt-image-1 完整錯誤輸出 + GCS 簽名網址回退）
+# app.py — LINE 故事繪本機器人
+# - gpt-image-1 完整錯誤輸出（403/安全攔截等）
+# - GCS 只用 V4 簽名網址（相容 Uniform bucket-level access）
+# - Slot 抽取與欄位填充：只追問缺的資訊，避免重複提問
+# - 故事整理切 5 段 + 隱藏參考圖 + 角色一致性
+
 import os, sys, json, re, uuid, time, threading, traceback, random, base64, requests
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
 # ---------- 基礎 ----------
 sys.stdout.reconfigure(encoding="utf-8")
+print("🚀 app boot: signed-url mode active, no make_public()")
 
 # ---------- Flask / LINE ----------
 from flask import Flask, request, abort
@@ -59,31 +65,25 @@ SAFE_HEADSHOT_EXTRA = (
     "No text, letters, logos, watermarks, signage, or brand names."
 )
 
+SLOT_KEYS = ["character", "appearance", "location", "time", "goal", "conflict", "resolution", "tone"]
+MANDATORY_SLOTS = ["character", "location", "goal"]  # 最少需要
+
 # ================== 通用工具 ==================
 def gcs_upload_bytes(data: bytes, filename: str, content_type="image/png") -> str:
-    """上傳到 GCS；若 bucket 禁止公開 ACL，回退簽名網址（V4 Signed URL）。"""
+    """上傳到 GCS；永遠回傳 V4 簽名網址（相容 Uniform / Public Access Prevention）"""
     blob = bucket.blob(f"line_images/{filename}")
     blob.upload_from_string(data, content_type=content_type)
 
-    # 嘗試公開（Fine-grained ACL 的情形可用）
-    try:
-        blob.make_public()
-        url = f"https://storage.googleapis.com/{GCS_BUCKET}/line_images/{filename}"
-        print("✅ GCS uploaded (public):", url)
-        return url
-    except Exception as e:
-        # Uniform bucket-level access / Public access prevention → 走簽名網址
-        print("ℹ️ make_public() not allowed, using signed URL:", repr(e))
-        ttl_days = int(os.environ.get("GCS_SIGNED_URL_DAYS", "7"))
-        url = blob.generate_signed_url(
-            version="v4",
-            expiration=datetime.utcnow() + timedelta(days=ttl_days),
-            method="GET",
-            response_disposition=f'inline; filename="{filename}"',
-            content_type=content_type,
-        )
-        print("✅ GCS uploaded (signed URL):", url)
-        return url
+    ttl_days = int(os.environ.get("GCS_SIGNED_URL_DAYS", "14"))
+    url = blob.generate_signed_url(
+        version="v4",
+        expiration=datetime.utcnow() + timedelta(days=ttl_days),
+        method="GET",
+        response_disposition=f'inline; filename="{filename}"',
+        content_type=content_type,
+    )
+    print("✅ GCS uploaded (signed URL):", url)
+    return url
 
 def save_story(story_id: str, data: dict):
     db.collection("stories").document(story_id).set(data, merge=True)
@@ -248,6 +248,101 @@ def openai_img2img(prompt: str, ref_bytes: bytes, size="1024x1024", retries=1) -
                     raise RuntimeError("OPENAI_ORG_NOT_VERIFIED")
             raise
 
+# ================== Slot 抽取與欄位填充 ==================
+def rule_extract_slots(text: str) -> Dict[str, str]:
+    """快速規則抽取，能抓到常見詞；LLM 抽取前的粗標。"""
+    slots = {}
+    # 角色/外觀
+    m = re.search(r"(叫|名為|名字是|他是|她是)([^，。！？,.]{1,12})", text)
+    if m: slots["character"] = m.group(2).strip()
+    if re.search(r"(短髮|長髮|棕髮|黑髮|金髮|瀏海|馬尾|眼鏡|帽子)", text):
+        slots["appearance"] = (slots.get("appearance","") + " " + re.findall(r"(短髮|長髮|棕髮|黑髮|金髮|瀏海|馬尾|眼鏡|帽子)", text)[0]).strip()
+
+    # 場景
+    loc_kw = re.findall(r"(在|來到|位於)([^。！!？\n]{2,12})(?:[。！!？\n]|$)", text)
+    if loc_kw:
+        slots["location"] = re.sub(r"^(在|來到|位於)", "", loc_kw[0][0]+loc_kw[0][1]).strip()
+
+    # 時間
+    if re.search(r"(早上|上午|中午|下午|傍晚|晚上|深夜|黎明|清晨|黃昏)", text):
+        slots["time"] = re.findall(r"(早上|上午|中午|下午|傍晚|晚上|深夜|黎明|清晨|黃昏)", text)[0]
+
+    # 目標
+    m = re.search(r"(想要|希望|目標|為了|打算)([^。！!？\n]{2,20})", text)
+    if m: slots["goal"] = m.group(2).strip()
+
+    # 衝突
+    m = re.search(r"(遇到|面臨|困難|挑戰|危機|阻礙)([^。！!？\n]{2,20})", text)
+    if m: slots["conflict"] = m.group(2).strip()
+
+    # 結局
+    m = re.search(r"(最後|終於|結果|因此)([^。！!？\n]{2,20})", text)
+    if m: slots["resolution"] = m.group(2).strip()
+
+    # 語氣
+    if re.search(r"(溫馨|緊張|感動|歡樂|神秘|冒險|療癒|寫實|童趣)", text):
+        slots["tone"] = re.findall(r"(溫馨|緊張|感動|歡樂|神秘|冒險|療癒|寫實|童趣)", text)[0]
+    return slots
+
+def llm_extract_slots(text: str) -> Dict[str, str]:
+    """用 LLM 精抽 slot；缺的就空字串。"""
+    sysmsg = (
+        "Extract story slots from Chinese text and return strict JSON with keys: "
+        "character, appearance, location, time, goal, conflict, resolution, tone. "
+        "Values should be short phrases (<=12 Chinese characters). Missing keys should be empty strings."
+    )
+    out = llm_chat(
+        [{"role":"system","content":sysmsg},
+         {"role":"user","content":text}],
+        temperature=0.1
+    )
+    try:
+        data = json.loads(out)
+        return {k:(data.get(k) or "").strip() for k in SLOT_KEYS}
+    except Exception:
+        return {}
+
+def merge_slots(old: Dict[str,str], new: Dict[str,str]) -> Dict[str,str]:
+    out = dict(old or {})
+    for k in SLOT_KEYS:
+        v = (new or {}).get(k)
+        if v and (k not in out or not out[k]):  # 只填補空白欄位；避免覆蓋使用者已定義
+            out[k] = v
+    return out
+
+def format_missing_questions(slots: Dict[str,str]) -> str:
+    missing = [k for k in MANDATORY_SLOTS if not slots.get(k)]
+    # 只追問前兩個缺的欄位
+    qmap = {
+        "character":"主角是誰？外觀如何？",
+        "location":"故事在哪裡發生？",
+        "goal":"主角的目標是什麼？",
+        "conflict":"遇到什麼挑戰？",
+        "time":"大概發生在什麼時間？（早上/晚上…）",
+        "resolution":"最後怎麼收尾？",
+        "tone":"整體氛圍想要偏向？（溫馨/冒險…）",
+    }
+    asks = [qmap[m] for m in missing[:2]]
+    if asks:
+        return "我先記下了！\n" + " / ".join(asks)
+    # 必要欄位都齊了 → 提示整理
+    return "很好！要我把故事整理成 5 段嗎？直接回「整理」即可。"
+
+def slots_to_story_text(slots: Dict[str,str]) -> str:
+    """把 slot 合成一段完整基底故事文本，供分段與生圖使用。"""
+    parts = []
+    c = slots.get("character"); a=slots.get("appearance"); loc=slots.get("location")
+    t = slots.get("time"); g=slots.get("goal"); con=slots.get("conflict")
+    r = slots.get("resolution"); tone=slots.get("tone")
+    if c and a: parts.append(f"{c}，{a}。")
+    elif c: parts.append(f"{c}。")
+    if loc or t: parts.append(f"故事發生在{t or ''}{loc or ''}。")
+    if g: parts.append(f"他/她想要{g}。")
+    if con: parts.append(f"途中遇到{con}。")
+    if r: parts.append(f"最後{r}。")
+    if tone: parts.append(f"整體氛圍偏{tone}。")
+    return "".join(parts)
+
 # ================== 隱藏參考圖（含降級） ==================
 def ensure_hidden_reference(story_id: str):
     story = read_story(story_id) or {}
@@ -256,9 +351,11 @@ def ensure_hidden_reference(story_id: str):
     if feats and href:
         return
 
+    # 若 slots 可用，優先拼出文字供角色特徵抽取
+    slots = (story.get("slots") or {})
+    base_text = story.get("story_text","") or slots_to_story_text(slots)
     if not feats:
-        txt = story.get("story_text", "")
-        feats = extract_features_from_text(txt)
+        feats = extract_features_from_text(base_text)
         save_story(story_id, {"character_features": feats})
 
     headshot_prompt = build_prompt(
@@ -282,7 +379,8 @@ def generate_scene_image(story_id: str, idx: int, extra: str="") -> str:
     if not scenes or idx < 1 or idx > 5:
         raise ValueError("Scenes not ready or index out of range.")
 
-    feats = story.get("character_features") or extract_features_from_text(story.get("story_text",""))
+    base_text = story.get("story_text","") or slots_to_story_text(story.get("slots") or {})
+    feats = story.get("character_features") or extract_features_from_text(base_text)
     save_story(story_id, {"character_features": feats})
 
     # 嘗試建立隱藏參考圖（失敗不阻斷）
@@ -323,11 +421,15 @@ def compact_story_from_dialog(messages: List[Dict[str, Any]]) -> str:
     user_lines = [m["content"] for m in messages if m.get("role")=="user"]
     return "\n".join(user_lines[-12:]).strip()
 
-def summarize_and_store(user_id: str, story_id: str, story_text: str) -> List[str]:
-    scenes = split_into_five_scenes(story_text)
+def summarize_and_store(user_id: str, story_id: str, story_text: str, slots: Dict[str,str]) -> List[str]:
+    # 若 slots 足夠，優先用 slots 組合的文本再加上使用者敘事
+    base = slots_to_story_text(slots)
+    corpus = (base + "\n" + story_text).strip() if story_text else base
+    scenes = split_into_five_scenes(corpus)
     save_story(story_id, {
         "user_id": user_id,
-        "story_text": story_text,
+        "story_text": corpus,
+        "slots": slots,
         "scenes_text": scenes,
         "style_preset": "watercolor_storybook_v1",
         "updated_at": firestore.SERVER_TIMESTAMP
@@ -372,23 +474,27 @@ def handle_message(event):
     save_chat(user_id, "user", text)
 
     try:
-        # 1) 開始
+        # 1) 開始說故事
         if re.search(r"(開始說故事|說故事|講個故事|開始創作|我們來講故事吧)", text):
             story_id = f"{user_id}-{uuid.uuid4().hex[:6]}"
             sess["story_id"] = story_id
-            save_story(story_id, {"user_id": user_id, "created_at": firestore.SERVER_TIMESTAMP})
-            line_bot_api.reply_message(reply_token, TextSendMessage("好的！自由描述你的故事。\n想把它整理成 5 段時，直接說「整理」。"))
+            save_story(story_id, {
+                "user_id": user_id,
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "slots": {}
+            })
+            line_bot_api.reply_message(reply_token, TextSendMessage("好的！自由描述你的故事。\n給完要素後，跟我說「整理」我會切成 5 段。"))
             return
 
         # 2) 整理 → 分 5 段（同時背景建立隱藏參考）
         if re.search(r"(整理|總結|summary)", text):
             story_id = sess.get("story_id") or f"{user_id}-{uuid.uuid4().hex[:6]}"
             sess["story_id"] = story_id
+            story_doc = read_story(story_id) or {}
+            curr_slots = story_doc.get("slots") or {}
             base_text = compact_story_from_dialog(sess["messages"])
-            if not base_text:
-                line_bot_api.reply_message(reply_token, TextSendMessage("再多說一點故事內容吧，我才好整理成 5 段～"))
-                return
-            scenes = summarize_and_store(user_id, story_id, base_text)
+
+            scenes = summarize_and_store(user_id, story_id, base_text, curr_slots)
             threading.Thread(target=ensure_hidden_reference, args=(story_id,), daemon=True).start()
             human = "\n".join([f"{i+1}. {s}" for i,s in enumerate(scenes)])
             line_bot_api.reply_message(reply_token, TextSendMessage("整理好了！\n\n"+human+"\n\n要畫哪一段？（如：畫第一段）"))
@@ -404,20 +510,23 @@ def handle_message(event):
             if not story_id:
                 story_id = f"{user_id}-{uuid.uuid4().hex[:6]}"
                 sess["story_id"] = story_id
-                base_text = compact_story_from_dialog(sess["messages"])
-                if not base_text:
-                    line_bot_api.reply_message(reply_token, TextSendMessage("先描述一下故事，再請我整理喔～"))
-                    return
-                summarize_and_store(user_id, story_id, base_text)
-                threading.Thread(target=ensure_hidden_reference, args=(story_id,), daemon=True).start()
+                save_story(story_id, {"user_id": user_id, "created_at": firestore.SERVER_TIMESTAMP, "slots": {}})
 
+            story_doc = read_story(story_id) or {}
+            # 若還沒分段，先用目前的 slots + 對話整理
+            if not story_doc.get("scenes_text"):
+                base_text = compact_story_from_dialog(sess["messages"])
+                scenes = summarize_and_store(user_id, story_id, base_text, story_doc.get("slots") or {})
+                threading.Thread(target=ensure_hidden_reference, args=(story_id,), daemon=True).start()
+                human = "\n".join([f"{i+1}. {s}" for i,s in enumerate(scenes)])
+                line_bot_api.reply_message(reply_token, TextSendMessage("先幫你整理了！\n\n"+human+"\n\n我開始畫指定段落囉～"))
             extra = re.sub(r"畫第[一二三四五12345]段", "", text).strip(" ，,。.!！")
             line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！我開始畫第 {n} 段，完成就傳給你～"))
 
             def bg_job():
                 with GEN_SEMAPHORE:
                     try:
-                        url = generate_scene_image(story_id, n, extra=extra)
+                        url = generate_scene_image(sess["story_id"], n, extra=extra)
                         line_bot_api.push_message(user_id, [
                             TextSendMessage(f"第 {n} 段完成！"),
                             ImageSendMessage(url, url)
@@ -428,7 +537,7 @@ def handle_message(event):
                             line_bot_api.push_message(user_id, TextSendMessage(
                                 "圖像生成功能尚未啟用：你的 OpenAI 組織未通過 Verify。\n"
                                 "請到 OpenAI Platform → Organization → General → Verify Organization。\n"
-                                "完成後等數分鐘再試一次。"
+                                "完成後數分鐘再試一次。"
                             ))
                         else:
                             print("❌ RuntimeError:", repr(e))
@@ -441,14 +550,20 @@ def handle_message(event):
             threading.Thread(target=bg_job, daemon=True).start()
             return
 
-        # 4) 一般引導（極簡）
-        tips = []
-        if not re.search(r"(主角|角色|他|她|名字|叫)", text): tips.append("主角是誰？外觀如何？")
-        if not re.search(r"(在哪|哪裡|場景|學校|城市|家裡|森林|海邊|太空)", text): tips.append("故事在哪裡發生？")
-        if not re.search(r"(想要|目標|希望|打算)", text): tips.append("主角的目標是什麼？")
-        if not re.search(r"(遇到|挑戰|問題|阻礙)", text): tips.append("他/她遇到什麼挑戰？")
-        if not re.search(r"(最後|結果|結局|收尾)", text): tips.append("最後會怎麼結束？")
-        reply = "我懂了！想再補充一點嗎？\n" + (" / ".join(tips[:2]) if tips else "說「整理」我就幫你切成 5 段～")
+        # 4) 一般對話：抽 slot → 合併 → 只問缺的
+        story_id = sess.get("story_id") or f"{user_id}-{uuid.uuid4().hex[:6]}"
+        sess["story_id"] = story_id
+        story_doc = read_story(story_id) or {}
+        curr_slots = story_doc.get("slots") or {}
+
+        # 規則先粗抽，再用 LLM 精抽補齊
+        rough = rule_extract_slots(text)
+        fine  = llm_extract_slots(text)
+        merged = merge_slots(curr_slots, merge_slots(rough, fine))
+
+        save_story(story_id, {"slots": merged, "updated_at": firestore.SERVER_TIMESTAMP})
+
+        reply = format_missing_questions(merged)
         line_bot_api.reply_message(reply_token, TextSendMessage(reply))
         save_chat(user_id, "assistant", reply)
 
