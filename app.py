@@ -8,7 +8,16 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 
 import requests
+import logging
 
+# =============== 日誌設定 ===============
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(asctime)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S%z",
+    force=True,
+)
+log = logging.getLogger("app")
 
 # =============== 基礎設定 ===============
 sys.stdout.reconfigure(encoding="utf-8")
@@ -17,13 +26,18 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET      = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY           = os.environ.get("OPENAI_API_KEY")
-LEONARDO_API_KEY         = os.environ.get("LEONARDO_API_KEY")  # 若你要切回 Leonardo 可保留
+LEONARDO_API_KEY         = os.environ.get("LEONARDO_API_KEY")  # 可保留以後切換
 GCS_BUCKET               = os.environ.get("GCS_BUCKET", "storybotimage")
+
+if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+    log.error("LINE credentials missing. LINE_CHANNEL_ACCESS_TOKEN or LINE_CHANNEL_SECRET is empty.")
+if not OPENAI_API_KEY:
+    log.warning("OPENAI_API_KEY is empty; image generation will fail.")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler      = WebhookHandler(LINE_CHANNEL_SECRET)
 
-print("🚀 app boot: signed-url mode active, no make_public()")
+log.info("🚀 app boot: public GCS URL mode (Uniform access + bucket public)")
 
 # =============== Firebase / Firestore（容錯） ===============
 import firebase_admin
@@ -42,54 +56,54 @@ def _init_firebase():
         if FIREBASE_CREDENTIALS:
             try:
                 cred = credentials.Certificate(json.loads(FIREBASE_CREDENTIALS))
-                print("✅ Firebase: using inline service account JSON")
+                log.info("✅ Firebase: using inline service account JSON")
             except Exception as e:
-                print(f"⚠️ FIREBASE_CREDENTIALS present but invalid: {e}. Fallback to ADC…")
+                log.warning("⚠️ FIREBASE_CREDENTIALS present but invalid: %s. Fallback to ADC…", e)
         if cred is None:
             cred = credentials.ApplicationDefault()
-            print("✅ Firebase: using Application Default Credentials")
+            log.info("✅ Firebase: using Application Default Credentials")
         firebase_admin.initialize_app(cred, {'projectId': FIREBASE_PROJECT_ID} if FIREBASE_PROJECT_ID else None)
         return firestore.client()
     except Exception as e:
-        print(f"❌ Firebase init failed, running WITHOUT Firestore: {e}")
+        log.error("❌ Firebase init failed, running WITHOUT Firestore: %s", e)
         return None
 
 db = _init_firebase()
 
-# =============== GCS（V4 簽名網址） ===============
+# =============== GCS（Uniform + 整桶公開讀取） ===============
 gcs_client = gcs_storage.Client()
 gcs_bucket = gcs_client.bucket(GCS_BUCKET)
 
 def gcs_upload_bytes(data: bytes, filename: str, content_type: str = "image/png", ttl_minutes: int = 60):
     """
     上傳到 GCS 並回傳公開 URL（Uniform bucket-level access + 全桶公開讀取）
+    備註：整桶已設為 allUsers:objectViewer，不需要 make_public()；無到期限制。
     """
+    t0 = time.time()
     try:
-        blob = _gcs_bucket.blob(filename)
-        blob.cache_control = "public, max-age=31536000"  # 一年快取，可視需求調整
+        blob = gcs_bucket.blob(filename)
+        blob.cache_control = "public, max-age=31536000"  # 可視需求調整
         blob.upload_from_string(data, content_type=content_type)
-
-        # 因為整桶已公開，不需要 make_public()
-        url = f"https://storage.googleapis.com/{_gcs_bucket.name}/{filename}"
-        print(f"✅ GCS uploaded & public: {filename} -> {url}")
+        url = f"https://storage.googleapis.com/{gcs_bucket.name}/{filename}"
+        log.info("☁️ GCS upload ok | ms=%d | name=%s | bytes=%d | url=%s",
+                 int((time.time()-t0)*1000), filename, len(data or b""), url)
         return url
-
     except GoogleAPIError as e:
-        print(f"❌ GCS error: {e}")
-        traceback.print_exc()
+        log.exception("❌ GCS API error: %s", e)
     except Exception as e:
-        print(f"❌ GCS unknown error: {e}")
-        traceback.print_exc()
-
+        log.exception("❌ GCS unknown error: %s", e)
     return None
 
 def gcs_upload_from_http(url: str, filename: str, ttl_minutes: int = 60):
+    t0 = time.time()
     try:
         r = requests.get(url, timeout=120)
         r.raise_for_status()
+        log.info("⬇️ download ok | ms=%d | src=%s | bytes=%d",
+                 int((time.time()-t0)*1000), url, len(r.content))
         return gcs_upload_bytes(r.content, filename, "image/png", ttl_minutes)
     except Exception as e:
-        print(f"❌ download then upload failed: {e}")
+        log.exception("❌ download then upload failed: %s", e)
         return None
 
 # =============== OpenAI 相容式導入 ===============
@@ -101,27 +115,29 @@ def _init_openai():
     if _oai_client:
         return
     try:
-        # 新版 SDK
         from openai import OpenAI
         _oai_client = OpenAI(api_key=OPENAI_API_KEY)
         _openai_mode = "sdk1"
-        print("✅ OpenAI init: sdk1 (OpenAI())")
+        log.info("✅ OpenAI init: sdk1 (OpenAI())")
     except Exception:
-        # 舊版 0.27/0.28
-        import openai
-        openai.api_key = OPENAI_API_KEY
-        _oai_client = openai
-        _openai_mode = "legacy"
-        print("✅ OpenAI init: legacy (openai.*)")
+        try:
+            import openai
+            openai.api_key = OPENAI_API_KEY
+            _oai_client = openai
+            _openai_mode = "legacy"
+            log.info("✅ OpenAI init: legacy (openai.*)")
+        except Exception as e:
+            log.exception("❌ OpenAI init failed: %s", e)
 
 _init_openai()
 
 def openai_images_generate(prompt: str, size: str = "1024x1024"):
     """
-    對 gpt-image-1 下圖，任何錯誤都印出完整細節
-    回傳 bytes（PNG）或 None
+    對 gpt-image-1 下圖；回傳 bytes（PNG）或 None；包含詳盡日誌。
     """
     try:
+        t0 = time.time()
+        log.info("🖼️ images.generate start | size=%s | prompt_len=%d", size, len(prompt))
         if _openai_mode == "sdk1":
             resp = _oai_client.images.generate(
                 model="gpt-image-1",
@@ -130,11 +146,7 @@ def openai_images_generate(prompt: str, size: str = "1024x1024"):
                 response_format="b64_json",
             )
             b64 = resp.data[0].b64_json
-            import base64
-            return base64.b64decode(b64)
         else:
-            # legacy
-            import openai
             resp = _oai_client.Image.create(
                 prompt=prompt,
                 size=size,
@@ -142,10 +154,13 @@ def openai_images_generate(prompt: str, size: str = "1024x1024"):
                 model="gpt-image-1",
             )
             b64 = resp["data"][0]["b64_json"]
-            import base64
-            return base64.b64decode(b64)
+
+        import base64
+        out = base64.b64decode(b64)
+        log.info("🖼️ images.generate ok | ms=%d | bytes=%d",
+                 int((time.time()-t0)*1000), len(out))
+        return out
     except Exception as e:
-        # 盡量抽出 HTTP code 與 body
         status = getattr(e, "status_code", None) or getattr(e, "http_status", None)
         body   = getattr(e, "response", None)
         text   = None
@@ -157,26 +172,23 @@ def openai_images_generate(prompt: str, size: str = "1024x1024"):
                     text = body.text
                 except Exception:
                     text = str(body)
-        print("💥 images.generate error:", type(e).__name__)
-        if status: print("status_code:", status)
-        print("message:", str(e))
-        if text: print("response body:", text)
+        log.error("💥 images.generate error | status=%s | msg=%s", status, str(e))
+        if text: log.error("💥 images.generate body | %s", text)
         return None
 
 # =============== 會話記憶（簡化） ===============
 user_sessions = {}      # {uid: {"messages":[...], "paras":[...]}}
 user_seeds    = {}      # {uid:int}
 
-# Firestore 存取都加保護
 def save_chat(user_id, role, text):
-    if not db: 
+    if not db:
         return
     try:
         db.collection("users").document(user_id).collection("chat").add({
             "role": role, "text": text, "timestamp": firestore.SERVER_TIMESTAMP
         })
     except Exception as e:
-        print("⚠️ Firebase save_chat failed:", e)
+        log.warning("⚠️ Firebase save_chat failed: %s", e)
 
 def save_story_summary(user_id, paragraphs):
     if not db:
@@ -187,7 +199,7 @@ def save_story_summary(user_id, paragraphs):
             "paragraphs": paragraphs, "updated_at": firestore.SERVER_TIMESTAMP
           })
     except Exception as e:
-        print("⚠️ save_story_summary failed:", e)
+        log.warning("⚠️ save_story_summary failed: %s", e)
 
 def load_latest_story_paragraphs(user_id):
     if not db:
@@ -199,7 +211,7 @@ def load_latest_story_paragraphs(user_id):
             d = doc.to_dict()
             return (d.get("paragraphs") or [])[:5]
     except Exception as e:
-        print("⚠️ load_latest_story_paragraphs failed:", e)
+        log.warning("⚠️ load_latest_story_paragraphs failed: %s", e)
     return None
 
 # =============== 摘要與分段（簡版） ===============
@@ -207,7 +219,6 @@ def _chat(messages, temperature=0.5):
     # 用於文字總結（走新版優先，失敗退舊版）
     try:
         if _openai_mode == "sdk1":
-            from openai import APIStatusError
             resp = _oai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
@@ -222,7 +233,7 @@ def _chat(messages, temperature=0.5):
             )
             return resp["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print("❌ OpenAI chat error:", e)
+        log.error("❌ OpenAI chat error: %s", e)
         return None
 
 def generate_story_summary(messages):
@@ -256,19 +267,29 @@ def build_scene_prompt(main_desc: str, extra: str = ""):
 # =============== Flask routes ===============
 @app.route("/")
 def root():
+    log.info("🏥 health check")
     return "LINE GPT Webhook is running!"
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers.get("X-Line-Signature")
+    sig = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
-    if not signature:
-        print("⚠️ Missing X-Line-Signature — non-LINE request. Ignored.")
+    log.info("🌐 /callback hit | sig_present=%s | len=%s", bool(sig), len(body) if body else 0)
+    if body:
+        log.info("📨 webhook body(head): %s", body[:500])
+
+    if not sig:
+        log.warning("Missing X-Line-Signature — likely health check or non-LINE caller.")
         return "OK"
     try:
-        handler.handle(body, signature)
+        handler.handle(body, sig)
+        log.info("✅ handler.handle success")
     except InvalidSignatureError:
+        log.error("❌ InvalidSignatureError: signature check failed.")
         abort(400)
+    except Exception as e:
+        log.exception("💥 Uncaught error in handler.handle: %s", e)
+        abort(500)
     return "OK"
 
 # =============== LINE 主流程 ===============
@@ -280,9 +301,10 @@ def _ensure_session(user_id):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
-    text = event.message.text.strip()
+    text = (event.message.text or "").strip()
+    log.info("📩 LINE text | user=%s | text=%s", user_id, text)
+
     reply_token = event.reply_token
-    print(f"📩 {user_id}: {text}")
 
     sess = _ensure_session(user_id)
     sess["messages"].append({"role":"user","content":text})
@@ -299,6 +321,7 @@ def handle_message(event):
         save_story_summary(user_id, paras)
         line_bot_api.reply_message(reply_token, TextSendMessage("✨ 故事總結完成：\n" + summary))
         save_chat(user_id, "assistant", summary)
+        log.info("↩️ reply text sent (summary) | user=%s", user_id)
         return
 
     # 畫第N段
@@ -307,14 +330,27 @@ def handle_message(event):
         n_map = {'一':1,'二':2,'三':3,'四':4,'五':5,'1':1,'2':2,'3':3,'4':4,'5':5}
         idx = n_map[m.group(2)] - 1
         extra = re.sub(r"(畫|請畫|幫我畫)第[一二三四五12345]段", "", text).strip(" ，,。.!！")
+        log.info("🎯 draw command | user=%s | idx=%d | extra=%s", user_id, idx, extra)
         _draw_and_reply_async(user_id, reply_token, idx, extra)
         return
 
     # 引導
     line_bot_api.reply_message(reply_token, TextSendMessage("我懂了！想再補充一點嗎？\n主角是誰？在哪裡？想發生什麼？"))
     save_chat(user_id, "assistant", "引導")
+    log.info("↩️ reply text sent (guide) | user=%s", user_id)
 
-# =============== 生成與推送（同步版，Cloud Run 一次一張即可） ===============
+# 捕捉非文字訊息，避免 webhook 黑洞
+@handler.add(MessageEvent)
+def handle_non_text(event):
+    user_id = getattr(event.source, "user_id", "unknown")
+    etype = type(event.message).__name__
+    log.info("🧾 LINE non-text | user=%s | message_type=%s", user_id, etype)
+    try:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage("目前我只看得懂文字訊息喔～"))
+    except Exception:
+        pass
+
+# =============== 生成與推送（同步版） ===============
 def _get_paragraphs_for_user(user_id, sess):
     paras = load_latest_story_paragraphs(user_id) or sess.get("paras") or []
     if paras:
@@ -332,37 +368,40 @@ def _get_paragraphs_for_user(user_id, sess):
 
 def _draw_and_reply_async(user_id, reply_token, idx, extra):
     try:
+        log.info("🎯 draw request | user=%s | scene_idx=%d | extra=%s", user_id, idx, extra)
         sess = _ensure_session(user_id)
         paras = _get_paragraphs_for_user(user_id, sess)
+        log.info("📚 paragraphs | count=%d", len(paras))
+
         if not paras or idx >= len(paras):
+            log.warning("❗ no paragraphs or idx out of range | idx=%d | count=%d", idx, len(paras))
             line_bot_api.reply_message(reply_token, TextSendMessage("我需要再多一點故事內容，才能開始畫喔～"))
             return
 
         scene = paras[idx]
         prompt = build_scene_prompt(f"Scene: {scene}", extra)
-        print(f"🖼️ images.generate prompt: {prompt[:500]}")
+        log.info("🧩 prompt head: %s", prompt[:200])
 
         img_bytes = openai_images_generate(prompt, size="1024x1024")
         if not img_bytes:
+            log.error("❌ image generation failed | user=%s", user_id)
             line_bot_api.reply_message(reply_token, TextSendMessage("圖片生成暫時失敗了，稍後再試一次可以嗎？"))
             return
 
         fname = f"line_images/{user_id}-{uuid.uuid4().hex[:6]}_s{idx+1}.png"
-        signed_url = gcs_upload_bytes(img_bytes, fname, "image/png", 120)
-        if not signed_url:
+        public_url = gcs_upload_bytes(img_bytes, fname, "image/png", 120)
+        if not public_url:
+            log.error("❌ GCS upload failed | file=%s", fname)
             line_bot_api.reply_message(reply_token, TextSendMessage("上傳圖片時出了點狀況，等等再請我重畫一次～"))
             return
 
-        msgs = [
-            TextSendMessage(f"第 {idx+1} 段完成了！"),
-            ImageSendMessage(signed_url, signed_url),
-        ]
+        msgs = [TextSendMessage(f"第 {idx+1} 段完成了！"), ImageSendMessage(public_url, public_url)]
         line_bot_api.reply_message(reply_token, msgs)
-        save_chat(user_id, "assistant", f"[image]{signed_url}")
+        log.info("✅ reply image sent | user=%s | url=%s", user_id, public_url)
+        save_chat(user_id, "assistant", f"[image]{public_url}")
 
     except Exception as e:
-        print("❌ 生成第N段失敗：", e)
-        traceback.print_exc()
+        log.exception("💥 生成第N段失敗: %s", e)
         try:
             line_bot_api.reply_message(reply_token, TextSendMessage("生成中遇到小狀況，等等再試一次可以嗎？"))
         except Exception:
