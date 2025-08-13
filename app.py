@@ -1,6 +1,6 @@
-# app.py — LINE 故事繪本機器人（含 gpt-image-1 完整錯誤輸出與回退）
+# app.py — LINE 故事繪本機器人（含 gpt-image-1 完整錯誤輸出 + GCS 簽名網址回退）
 import os, sys, json, re, uuid, time, threading, traceback, random, base64, requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
 # ---------- 基礎 ----------
@@ -61,12 +61,29 @@ SAFE_HEADSHOT_EXTRA = (
 
 # ================== 通用工具 ==================
 def gcs_upload_bytes(data: bytes, filename: str, content_type="image/png") -> str:
+    """上傳到 GCS；若 bucket 禁止公開 ACL，回退簽名網址（V4 Signed URL）。"""
     blob = bucket.blob(f"line_images/{filename}")
     blob.upload_from_string(data, content_type=content_type)
-    blob.make_public()
-    url = f"https://storage.googleapis.com/{GCS_BUCKET}/line_images/{filename}"
-    print("✅ GCS uploaded:", url)
-    return url
+
+    # 嘗試公開（Fine-grained ACL 的情形可用）
+    try:
+        blob.make_public()
+        url = f"https://storage.googleapis.com/{GCS_BUCKET}/line_images/{filename}"
+        print("✅ GCS uploaded (public):", url)
+        return url
+    except Exception as e:
+        # Uniform bucket-level access / Public access prevention → 走簽名網址
+        print("ℹ️ make_public() not allowed, using signed URL:", repr(e))
+        ttl_days = int(os.environ.get("GCS_SIGNED_URL_DAYS", "7"))
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.utcnow() + timedelta(days=ttl_days),
+            method="GET",
+            response_disposition=f'inline; filename="{filename}"',
+            content_type=content_type,
+        )
+        print("✅ GCS uploaded (signed URL):", url)
+        return url
 
 def save_story(story_id: str, data: dict):
     db.collection("stories").document(story_id).set(data, merge=True)
@@ -189,7 +206,6 @@ def openai_generate(prompt: str, size="1024x1024", retries=1) -> bytes:
             time.sleep(wait)
         except (BadRequestError, APIStatusError, AuthenticationError) as e:
             _print_api_error("💥 images.generate error", e)
-            # 針對 403 組織未驗證，拋出易懂訊息給呼叫端
             if isinstance(e, APIStatusError) and getattr(e, "status_code", None) == 403:
                 body = ""
                 try:
@@ -289,12 +305,11 @@ def generate_scene_image(story_id: str, idx: int, extra: str="") -> str:
             img = openai_generate(prompt)
     except RuntimeError as e:
         if str(e) == "OPENAI_ORG_NOT_VERIFIED":
-            # 對使用者/管理者給出清楚訊息
             raise RuntimeError("OPENAI_ORG_NOT_VERIFIED")
         else:
             raise
     except APIStatusError as e:
-        # 如果被安全攔截，回退更安全的 prompt 再試一次
+        # 安全攔截 → 回退更安全的 prompt
         print("↩️ fallback to safer prompt due to APIStatusError")
         safer = prompt + " Avoid showing specific logos, school names, medical settings, or explicit content."
         img = openai_generate(safer)
