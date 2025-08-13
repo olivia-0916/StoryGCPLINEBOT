@@ -1,8 +1,8 @@
 flask
-line-bot-sdk
-openai==0.28
-python-dotenv
-firebase-admin
 gunicorn
-requests
+line-bot-sdk
+openai>=1.40.0
+firebase-admin
 google-cloud-storage
+requests
+python-dotenv
