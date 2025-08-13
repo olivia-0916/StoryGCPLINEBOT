@@ -213,10 +213,18 @@ def build_image_prompt(user_id, scene_brief, user_extra_desc=""):
         "Signature outfit/items must appear on the main character only."
     )
     world = get_world(user_id)
+
+    hard_rules = (
+        "Compose a full scene (not a centered portrait). "
+        "Show environment and story action. "
+        "Exactly one main character unless the story explicitly mentions others. "
+        "No plain white or blank backgrounds."
+    )
+
     parts = [
         character,
         "family-friendly, wholesome, uplifting tone, modest clothing, safe for work, non-violent.",
-        "Full-scene composition; avoid centered portrait; show environment and story action.",
+        hard_rules,
         f"Scene description: setting: {scene_brief.get('setting', world['setting'])}, ",
         f"time of day: {scene_brief.get('time_of_day', world['time_of_day'])}, ",
         f"mood: {scene_brief.get('mood', world['mood'])}, ",
@@ -229,10 +237,16 @@ def build_image_prompt(user_id, scene_brief, user_extra_desc=""):
     if user_extra_desc:
         parts.append(f"User additions: {user_extra_desc}")
     prompt = " ".join(parts)
-    neg = ("text, letters, words, captions, subtitles, watermark, signature, "
-           "different character, change hairstyle, change outfit, age change, gender change, "
-           "blonde hair, red hair, light brown hair, blue eyes, green eyes, non-East-Asian facial features")
+
+    neg = (
+        "text, letters, words, captions, subtitles, watermark, signature, "
+        "multiple main characters, collage, grid, duplicated subject, "
+        "plain white background, empty background, studio backdrop, "
+        "different character, change hairstyle, change outfit, age change, gender change, "
+        "blonde hair, red hair, light brown hair, blue eyes, green eyes, non-East-Asian facial features"
+    )
     return prompt, neg
+
 
 # ---------- Leonardo 調用 ----------
 def leonardo_headers():
@@ -254,58 +268,49 @@ def leonardo_tti(payload):
 def leonardo_poll(gen_id, timeout=150):
     url = f"{LEO_BASE}/generations/{gen_id}"
     start = time.time()
-    print(f"🔄 開始輪詢 Leonardo 生成狀態：{gen_id}")
-    
-    while time.time()-start < timeout:
+    while time.time() - start < timeout:
         time.sleep(4)
         try:
             r = requests.get(url, headers=leonardo_headers(), timeout=30)
-            print(f"📥 檢查狀態嘗試，status: {r.status_code}")
-            
             if not r.ok:
-                print(f"❌ Leonardo GET 失敗: {r.status_code}, {r.text}")
+                print("❌ Leonardo GET 失敗:", r.status_code, r.text)
                 continue
-                
-            r.raise_for_status()
             data = r.json()
-            print(f"📄 Leonardo 回應資料: {json.dumps(data, ensure_ascii=False)[:500]}...")
-            
-            # 修正：使用正確的 Leonardo API 回應格式
-            if data.get("generations_by_pk"):
-                generation_data = data["generations_by_pk"]
-                status = generation_data.get("status")
-                print(f"⏳ 圖片生成狀態: {status}")
-                
+
+            # ✅ 新格式
+            if data.get("generations_v2"):
+                g = data["generations_v2"][0]
+                status = g.get("status")
                 if status == "COMPLETE":
-                    generated_images = generation_data.get("generated_images", [])
-                    if generated_images:
-                        gi = generated_images[0]
-                        image_url = gi.get("url")
-                        image_id = gi.get("id")
-                        print(f"✅ Leonardo 圖片生成完成！URL: {image_url}, ID: {image_id}")
-                        return image_url, image_id
-                    else:
-                        print("❌ 沒有找到生成的圖片")
-                elif status == "FAILED":
-                    print("❌ 圖片生成失敗")
+                    gi = g["generated_images"][0]
+                    return gi.get("url"), gi.get("id")
+                if status == "FAILED":
                     return None, None
-            else:
-                print(f"⚠️ 回應格式異常: {data}")
-                
+
+            # ✅ 舊格式
+            if data.get("generations_by_pk"):
+                g = data["generations_by_pk"]
+                status = g.get("status")
+                if status == "COMPLETE":
+                    imgs = g.get("generated_images", [])
+                    if imgs:
+                        return imgs[0].get("url"), imgs[0].get("id")
+                    return None, None
+                if status == "FAILED":
+                    return None, None
+
+            print("⏳ 等待中…", json.dumps(data, ensure_ascii=False)[:200])
+
         except Exception as e:
-            print(f"❌ 檢查狀態時發生錯誤: {e}")
+            print("❌ 輪詢異常：", e)
             traceback.print_exc()
-            
-    print(f"⏰ 輪詢超時 ({timeout}s)，生成 ID: {gen_id}")
+
+    print(f"⏰ 輪詢超時 {timeout}s, gen_id={gen_id}")
     return None, None
+
 
 def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_image_id=None, init_strength=None):
     print(f"🎨 開始 Leonardo 圖片生成...")
-    print(f"👤 用戶 ID: {user_id}")
-    print(f"🔑 種子值: {seed}")
-    print(f"🖼️ 初始圖片 ID: {init_image_id}")
-    print(f"💪 初始強度: {init_strength}")
-    
     payload = {
         "modelId": LEO_MODEL,
         "prompt": prompt[:1500],
@@ -317,36 +322,28 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
         "negative_prompt": negative_prompt,
         "seed": int(seed)
     }
-    
-    # 修正：使用正確的 Leonardo Image-to-Image 參數
+
+    # ✅ 正確的 img2img 參數（Leonardo）
     if init_image_id and init_strength:
-        payload["init_image_id"] = init_image_id
+        payload["isInitImage"] = True
+        payload["init_generation_image_id"] = init_image_id
         payload["init_strength"] = float(init_strength)
-        print(f"🔄 使用 Image-to-Image 模式")
 
     print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
-    
     try:
         gen_id = leonardo_tti(payload)
         print("✅ Leonardo Generation ID:", gen_id)
-        
         url, image_id = leonardo_poll(gen_id)
         if url:
-            print(f"🎉 Leonardo 圖片生成成功！開始上傳到 GCS...")
             gcs_url = upload_to_gcs_from_url(url, user_id, prompt)
-            if gcs_url:
-                print(f"🎊 完整流程成功！GCS URL: {gcs_url}")
-                return {"url": gcs_url, "image_id": image_id}
-            else:
-                print("❌ GCS 上傳失敗")
-                return None
+            return {"url": gcs_url, "image_id": image_id} if gcs_url else None
         else:
             print("❌ Leonardo 圖片生成失敗或超時")
             return None
-            
     except requests.HTTPError as e:
-        if init_image_id and "Unexpected variable" in str(e):
-            print("↩️ 自動降級：改用 text-to-image 重試（保留 seed 與 prompt）")
+        # 某些舊版 schema 會對未知欄位報 400；降級成 T2I 再試一次
+        if init_image_id and ("Unexpected variable" in str(e) or "bad-request" in str(e)):
+            print("↩️ 自動降級：移除 init 參數改用 text-to-image 重試")
             return generate_leonardo_image(
                 user_id=user_id, prompt=prompt, negative_prompt=negative_prompt,
                 seed=seed, init_image_id=None, init_strength=None
@@ -357,6 +354,7 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
         print(f"❌ Leonardo 其他錯誤：{e}")
         traceback.print_exc()
         return None
+
 
 # ---------- 引導與格式 ----------
 base_system_prompt = (
