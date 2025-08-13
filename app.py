@@ -317,9 +317,10 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
         "negative_prompt": negative_prompt,
         "seed": int(seed)
     }
+    
+    # 修正：使用正確的 Leonardo Image-to-Image 參數
     if init_image_id and init_strength:
-        payload["isInitImage"] = True
-        payload["init_generation_image_id"] = init_image_id
+        payload["init_image_id"] = init_image_id
         payload["init_strength"] = float(init_strength)
         print(f"🔄 使用 Image-to-Image 模式")
 
