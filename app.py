@@ -1,5 +1,5 @@
-# app.py — LINE 故事繪本機器人（含 gpt-image-1 完整錯誤輸出）
-import os, sys, json, re, uuid, time, tempfile, threading, traceback, random, base64, requests
+# app.py — LINE 故事繪本機器人（含 gpt-image-1 完整錯誤輸出與回退）
+import os, sys, json, re, uuid, time, threading, traceback, random, base64, requests
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -162,7 +162,6 @@ def _decode_image_response(resp) -> bytes:
 
 def _print_api_error(prefix: str, err: Exception):
     print(f"{prefix}: {err.__class__.__name__}")
-    # 盡可能把服務端訊息、回包 body 印出來（上限 2KB）
     if isinstance(err, APIStatusError):
         print("  status_code:", getattr(err, "status_code", None))
         msg = getattr(err, "message", "")
@@ -190,6 +189,15 @@ def openai_generate(prompt: str, size="1024x1024", retries=1) -> bytes:
             time.sleep(wait)
         except (BadRequestError, APIStatusError, AuthenticationError) as e:
             _print_api_error("💥 images.generate error", e)
+            # 針對 403 組織未驗證，拋出易懂訊息給呼叫端
+            if isinstance(e, APIStatusError) and getattr(e, "status_code", None) == 403:
+                body = ""
+                try:
+                    body = e.response.text or ""
+                except Exception:
+                    pass
+                if "must be verified" in body:
+                    raise RuntimeError("OPENAI_ORG_NOT_VERIFIED")
             raise
         except Exception as e:
             last_err = e
@@ -214,6 +222,14 @@ def openai_img2img(prompt: str, ref_bytes: bytes, size="1024x1024", retries=1) -
             time.sleep(wait)
         except (BadRequestError, APIStatusError, AuthenticationError) as e:
             _print_api_error("💥 images.edits error", e)
+            if isinstance(e, APIStatusError) and getattr(e, "status_code", None) == 403:
+                body = ""
+                try:
+                    body = e.response.text or ""
+                except Exception:
+                    pass
+                if "must be verified" in body:
+                    raise RuntimeError("OPENAI_ORG_NOT_VERIFIED")
             raise
 
 # ================== 隱藏參考圖（含降級） ==================
@@ -271,6 +287,12 @@ def generate_scene_image(story_id: str, idx: int, extra: str="") -> str:
             img = openai_img2img(prompt, rb)
         else:
             img = openai_generate(prompt)
+    except RuntimeError as e:
+        if str(e) == "OPENAI_ORG_NOT_VERIFIED":
+            # 對使用者/管理者給出清楚訊息
+            raise RuntimeError("OPENAI_ORG_NOT_VERIFIED")
+        else:
+            raise
     except APIStatusError as e:
         # 如果被安全攔截，回退更安全的 prompt 再試一次
         print("↩️ fallback to safer prompt due to APIStatusError")
@@ -386,10 +408,21 @@ def handle_message(event):
                             ImageSendMessage(url, url)
                         ])
                         save_chat(user_id, "assistant", f"[image]{url}")
+                    except RuntimeError as e:
+                        if str(e) == "OPENAI_ORG_NOT_VERIFIED":
+                            line_bot_api.push_message(user_id, TextSendMessage(
+                                "圖像生成功能尚未啟用：你的 OpenAI 組織未通過 Verify。\n"
+                                "請到 OpenAI Platform → Organization → General → Verify Organization。\n"
+                                "完成後等數分鐘再試一次。"
+                            ))
+                        else:
+                            print("❌ RuntimeError:", repr(e))
+                            traceback.print_exc()
+                            line_bot_api.push_message(user_id, TextSendMessage("這段暫時畫不出來。已記錄完整錯誤在日誌，請稍後再試或換個描述。"))
                     except Exception as e:
                         print("❌ 生成第N段失敗：", repr(e))
                         traceback.print_exc()
-                        line_bot_api.push_message(user_id, TextSendMessage("這段暫時畫不出來。已把錯誤細節記錄在日誌，請稍後再試或換個描述。"))
+                        line_bot_api.push_message(user_id, TextSendMessage("這段暫時畫不出來。已記錄完整錯誤在日誌，請稍後再試或換個描述。"))
             threading.Thread(target=bg_job, daemon=True).start()
             return
 
