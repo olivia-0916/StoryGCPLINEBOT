@@ -42,7 +42,7 @@ IMG_H = 512
 
 # ---------- 會話狀態 ----------
 user_sessions         = {}  # {user_id: {"messages":[...], "story_mode":True, "summary":"", "paras":[...]} }
-user_character_cards  = {}  # {user_id: "角色描述"}
+user_character_cards  = {}  # {user_id: {"物種": "貓", "髮型": "長髮", "眼型": "大眼睛", "體型": "高", "年齡": "年輕", "能力": "魔法"}}
 user_story_contexts   = {}  # {user_id: "故事背景"}
 user_last_images      = {}  # {user_id: {"url": "...", "image_id": "..."}}
 user_seeds            = {}  # {user_id: 隨機種子值}
@@ -143,49 +143,133 @@ def extract_paragraphs(summary):
 # ---------- 智能角色特徵提取 ----------
 def extract_character_features(text):
     """智能提取角色特徵，支援任何類型的角色描述"""
-    features = []
+    features = {}
     
-    # 基本特徵
-    if re.search(r"(穿|戴|頭上|衣|裙|襯衫|鞋|配件)", text):
-        features.append("clothing")
-    if re.search(r"(頭髮|髮型|髮色|長髮|短髮|捲髮|直髮)", text):
-        features.append("hairstyle")
-    if re.search(r"(眼睛|眼珠|眼鏡|眼型)", text):
-        features.append("eyes")
-    if re.search(r"(膚色|皮膚|白|黑|黃|棕)", text):
-        features.append("skin")
-    if re.search(r"(身高|體型|胖|瘦|高|矮|壯|嬌小)", text):
-        features.append("body")
-    if re.search(r"(年齡|歲|年輕|老|中年|小孩|大人)", text):
-        features.append("age")
+    # 服裝特徵
+    clothing_patterns = {
+        "裙子": r"(長裙|短裙|連衣裙|百褶裙|紗裙|公主裙|禮服)",
+        "上衣": r"(上衣|襯衫|T恤|毛衣|外套|大衣|西裝)",
+        "褲子": r"(褲子|長褲|短褲|牛仔褲|休閒褲)",
+        "鞋子": r"(鞋子|靴子|運動鞋|高跟鞋|涼鞋)",
+        "配件": r"(帽子|眼鏡|項鍊|手錶|包包|圍巾)"
+    }
+    
+    for category, pattern in clothing_patterns.items():
+        matches = re.findall(pattern, text)
+        if matches:
+            features[category] = matches[0]
+    
+    # 顏色特徵
+    color_patterns = {
+        "主要顏色": r"(灰色|黑色|白色|紅色|藍色|綠色|黃色|粉色|紫色|橙色|棕色)",
+        "服裝顏色": r"(穿|戴|著)(灰色|黑色|白色|紅色|藍色|綠色|黃色|粉色|紫色|橙色|棕色)",
+        "頭髮顏色": r"(頭髮|髮色)(是|為|為|的)(灰色|黑色|白色|紅色|藍色|綠色|黃色|粉色|紫色|橙色|棕色)"
+    }
+    
+    for category, pattern in color_patterns.items():
+        matches = re.findall(pattern, text)
+        if matches:
+            features[category] = matches[0]
+    
+    # 外貌特徵
+    if re.search(r"(長髮|短髮|捲髮|直髮|馬尾|辮子)", text):
+        features["髮型"] = re.search(r"(長髮|短髮|捲髮|直髮|馬尾|辮子)", text).group(1)
+    
+    if re.search(r"(大眼睛|小眼睛|圓眼|鳳眼|單眼皮|雙眼皮)", text):
+        features["眼型"] = re.search(r"(大眼睛|小眼睛|圓眼|鳳眼|單眼皮|雙眼皮)", text).group(1)
+    
+    if re.search(r"(高|矮|胖|瘦|壯|嬌小|苗條)", text):
+        features["體型"] = re.search(r"(高|矮|胖|瘦|壯|嬌小|苗條)", text).group(1)
+    
+    if re.search(r"(年輕|老|中年|小孩|大人|青少年)", text):
+        features["年齡"] = re.search(r"(年輕|老|中年|小孩|大人|青少年)", text).group(1)
+    
+    # 特殊特徵
     if re.search(r"(動物|貓|狗|鳥|魚|龍|精靈|機器人|外星人)", text):
-        features.append("species")
+        features["物種"] = re.search(r"(動物|貓|狗|鳥|魚|龍|精靈|機器人|外星人)", text).group(1)
+    
     if re.search(r"(魔法|超能力|特殊能力|技能)", text):
-        features.append("powers")
+        features["能力"] = re.search(r"(魔法|超能力|特殊能力|技能)", text).group(1)
     
     return features
 
 def update_character_card(user_id, text):
     """動態更新角色卡，支援任何類型的角色"""
     if user_id not in user_character_cards:
-        user_character_cards[user_id] = ""
+        user_character_cards[user_id] = {}
     
     # 提取新特徵
     new_features = extract_character_features(text)
     
     # 更新角色卡
     if new_features:
-        # 如果角色卡為空，建立基礎描述
-        if not user_character_cards[user_id]:
-            user_character_cards[user_id] = f"Main character with: {', '.join(new_features)}. "
+        user_character_cards[user_id].update(new_features)
         
-        # 添加新描述
-        user_character_cards[user_id] += f"Additional details: {text}. "
+        # 生成角色描述
+        character_desc = build_character_description(user_character_cards[user_id])
+        user_character_cards[user_id]["description"] = character_desc
         
-        print(f"✨ 角色卡已更新: {user_character_cards[user_id][:100]}...")
+        print(f"✨ 角色卡已更新: {character_desc[:100]}...")
         return True
     
     return False
+
+def build_character_description(features):
+    """根據特徵建立角色描述"""
+    parts = []
+    
+    # 基本描述
+    if "物種" in features:
+        parts.append(f"A {features['物種']}")
+    else:
+        parts.append("A person")
+    
+    # 外貌特徵
+    if "年齡" in features:
+        parts.append(f"who is {features['年齡']}")
+    
+    if "體型" in features:
+        parts.append(f"with a {features['體型']} build")
+    
+    if "髮型" in features:
+        parts.append(f"having {features['髮型']}")
+    
+    if "眼型" in features:
+        parts.append(f"with {features['眼型']}")
+    
+    # 服裝特徵
+    clothing_parts = []
+    if "裙子" in features:
+        clothing_parts.append(f"wearing a {features['裙子']}")
+    if "上衣" in features:
+        clothing_parts.append(f"in a {features['上衣']}")
+    if "褲子" in features:
+        clothing_parts.append(f"with {features['褲子']}")
+    
+    if clothing_parts:
+        parts.append(", ".join(clothing_parts))
+    
+    # 顏色特徵
+    if "主要顏色" in features:
+        parts.append(f"in {features['主要顏色']} color")
+    
+    # 能力特徵
+    if "能力" in features:
+        parts.append(f"with {features['能力']}")
+    
+    # 組合描述
+    description = " ".join(parts) + "."
+    
+    # 添加一致性要求
+    description += " Maintain consistent appearance across all images: same face, hairstyle, clothing, colors, and proportions."
+    
+    return description
+
+def get_character_prompt(user_id):
+    """獲取角色 prompt"""
+    if user_id in user_character_cards and "description" in user_character_cards[user_id]:
+        return user_character_cards[user_id]["description"]
+    return "Main character with unique features. Maintain consistent appearance across all images."
 
 # ---------- 場景分析 ----------
 def analyze_scene(paragraph, user_id):
@@ -233,13 +317,13 @@ def build_image_prompt(user_id, scene, user_extra_desc=""):
     """生成開放的圖像 prompt，支援任何類型的角色和場景"""
     
     # 基礎角色描述
-    character_base = user_character_cards.get(user_id, "Main character with unique features")
+    character_base = get_character_prompt(user_id)
     
-    # 風格指導
+    # 風格指導 - 確保插畫風格
     style_guide = (
-        "Beautiful, detailed illustration. Full scene composition. "
+        "Beautiful, detailed illustration in watercolor style. Full scene composition. "
         "Avoid text, letters, words, captions, subtitles, watermark, signature. "
-        "Show environment and story action."
+        "Show environment and story action. High quality, artistic illustration."
     )
     
     # 場景描述
@@ -251,15 +335,19 @@ def build_image_prompt(user_id, scene, user_extra_desc=""):
         f"Background: {scene.get('background', 'environmental elements')}"
     )
     
-    # 組合 prompt
+    # 組合 prompt - 角色描述放在最前面，確保優先級
     parts = [character_base, style_guide, scene_desc]
     if user_extra_desc:
         parts.append(f"User requirements: {user_extra_desc}")
     
     prompt = " ".join(parts)
     
-    # 負面 prompt
-    negative = "text, letters, words, captions, subtitles, watermark, signature, low quality, blurry"
+    # 負面 prompt - 加強角色一致性要求
+    negative = (
+        "text, letters, words, captions, subtitles, watermark, signature, "
+        "low quality, blurry, different character, change hairstyle, change outfit, "
+        "age change, gender change, inconsistent appearance"
+    )
     
     return prompt, negative
 
@@ -407,7 +495,7 @@ def callback():
 # ---------- 狀態工具 ----------
 def reset_session(user_id):
     user_sessions[user_id] = {"messages": [], "story_mode": True, "summary": "", "paras": []}
-    user_character_cards[user_id] = ""
+    user_character_cards[user_id] = {} # 重置角色卡
     user_story_contexts[user_id] = {}
     user_seeds[user_id] = random.randint(100000, 999999)
     print(f"✅ Reset session for {user_id}, seed={user_seeds[user_id]}")
@@ -451,12 +539,19 @@ def bg_generate_and_push_draw(user_id, n, extra_desc):
             seed = user_seeds.setdefault(user_id, random.randint(100000,999999))
             
             # 智能決定是否使用 Image-to-Image
-            use_init = bool(ref_id and n > 0)  # 第一段不用，後續可用
+            # 第一段不用，後續如果有角色卡且不是第一次畫圖就用
+            use_init = bool(ref_id and n > 0 and user_character_cards.get(user_id, {}).get("description"))
+            
+            print(f"🎨 生成第 {n+1} 段插圖")
+            print(f"👤 角色卡: {get_character_prompt(user_id)[:100]}...")
+            print(f"🖼️ 使用 Image-to-Image: {use_init}")
+            if use_init:
+                print(f"🔗 參考圖片 ID: {ref_id}")
 
             result = generate_leonardo_image(
                 user_id=user_id, prompt=prompt, negative_prompt=neg,
                 seed=seed, init_image_id=(ref_id if use_init else None), 
-                init_strength=(0.24 if use_init else None)
+                init_strength=(0.3 if use_init else None)  # 提高強度確保一致性
             )
             
             if result and result["url"]:
@@ -488,7 +583,7 @@ def bg_generate_and_push_portrait(user_id):
     with GEN_SEMAPHORE:
         try:
             # 使用現有角色卡或建立基礎角色卡
-            character_desc = user_character_cards.get(user_id) or "Main character with unique features"
+            character_desc = get_character_prompt(user_id)
             seed = user_seeds.setdefault(user_id, random.randint(100000,999999))
             
             prompt = character_desc + " Beautiful, detailed character portrait. Full body shot."
@@ -544,7 +639,7 @@ def handle_message(event):
 
         # 智能角色特徵提取和更新
         if update_character_card(user_id, text):
-            print(f"✨ 角色卡已更新: {user_character_cards[user_id][:100]}...")
+            print(f"✨ 角色卡已更新: {user_character_cards[user_id]['description'][:100]}...")
 
         # 整理 / 總結
         if re.search(r"(整理|總結|summary)", text):
@@ -566,6 +661,21 @@ def handle_message(event):
         if "定妝" in text:
             line_bot_api.reply_message(reply_token, TextSendMessage("收到，我先做定妝照，畫好就傳給你～"))
             threading.Thread(target=bg_generate_and_push_portrait, args=(user_id,), daemon=True).start()
+            return
+
+        # 查看角色卡
+        if "角色卡" in text or "查看角色" in text:
+            if user_id in user_character_cards and user_character_cards[user_id]:
+                character_info = user_character_cards[user_id]
+                response = "📋 當前角色卡：\n"
+                for key, value in character_info.items():
+                    if key != "description":
+                        response += f"• {key}: {value}\n"
+                if "description" in character_info:
+                    response += f"\n🎨 完整描述：\n{character_info['description']}"
+            else:
+                response = "還沒有建立角色卡，請先描述一下角色特徵吧！"
+            line_bot_api.reply_message(reply_token, TextSendMessage(response))
             return
 
         # 畫第 N 段
