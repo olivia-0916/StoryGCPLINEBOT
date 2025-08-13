@@ -9,6 +9,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSend
 
 import requests
 
+
 # =============== 基礎設定 ===============
 sys.stdout.reconfigure(encoding="utf-8")
 app = Flask(__name__)
@@ -61,27 +62,25 @@ gcs_bucket = gcs_client.bucket(GCS_BUCKET)
 
 def gcs_upload_bytes(data: bytes, filename: str, content_type: str = "image/png", ttl_minutes: int = 60):
     """
-    上傳到 GCS 並回傳 v4 簽名網址（GET）
-    需要：Cloud Run 服務帳號具備
-      - roles/storage.objectCreator
-      - roles/storage.objectViewer
-      - roles/iam.serviceAccountTokenCreator（簽名）
+    上傳到 GCS 並回傳公開 URL（Uniform bucket-level access + 全桶公開讀取）
     """
     try:
-        blob = gcs_bucket.blob(filename)
+        blob = _gcs_bucket.blob(filename)
+        blob.cache_control = "public, max-age=31536000"  # 一年快取，可視需求調整
         blob.upload_from_string(data, content_type=content_type)
-        url = blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(minutes=ttl_minutes),
-            method="GET",
-        )
-        print(f"✅ GCS uploaded & signed: {filename}")
+
+        # 因為整桶已公開，不需要 make_public()
+        url = f"https://storage.googleapis.com/{_gcs_bucket.name}/{filename}"
+        print(f"✅ GCS uploaded & public: {filename} -> {url}")
         return url
+
     except GoogleAPIError as e:
         print(f"❌ GCS error: {e}")
+        traceback.print_exc()
     except Exception as e:
         print(f"❌ GCS unknown error: {e}")
         traceback.print_exc()
+
     return None
 
 def gcs_upload_from_http(url: str, filename: str, ttl_minutes: int = 60):
