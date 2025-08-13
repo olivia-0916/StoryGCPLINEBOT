@@ -110,12 +110,14 @@ def load_latest_story_paragraphs(user_id):
 def upload_to_gcs_from_url(url, user_id, prompt):
     tmp_path = None
     try:
+        print(f"📥 開始從 Leonardo 下載圖片: {url}")
         with requests.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
             fd, tmp_path = tempfile.mkstemp(prefix="img_", suffix=".png", dir="/tmp")
             with os.fdopen(fd, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024*64):
-                    if chunk: f.write(chunk)
+                    if chunk:
+                        f.write(chunk)
         filename = f"{user_id}_{uuid.uuid4().hex}.png"
         blob = gcs_bucket.blob(filename)
         blob.upload_from_filename(tmp_path, content_type="image/png")
@@ -126,7 +128,8 @@ def upload_to_gcs_from_url(url, user_id, prompt):
         print("✅ 圖片已上傳至 GCS 並儲存：", gcs_url)
         return gcs_url
     except Exception as e:
-        print("❌ GCS upload failed:", e)
+        print(f"❌ GCS 上傳失敗: {e}")
+        traceback.print_exc()
         return None
     finally:
         try:
@@ -185,44 +188,6 @@ def build_scene_brief(paragraph, world_hint=None):
             "key_objects": ""
         }
 
-# ---------- 顏色與穿著：抽取 + 鎖色 ----------
-def _extract_outfit_and_update_sheet(user_id, text):
-    m = re.search(r"(穿|戴)[：:\s]*([^，。,！!？?\n]+)", text)
-    wear_txt = None
-    color_map = {
-        "粉": "pink","粉色": "pink","粉紅": "pink",
-        "紅":"red","紅色":"red","藍":"blue","藍色":"blue",
-        "綠":"green","綠色":"green","黃":"yellow","黃色":"yellow",
-        "白":"white","白色":"white","黑":"black","黑色":"black",
-        "紫":"purple","紫色":"purple","橘":"orange","橘色":"orange",
-        "棕":"brown","棕色":"brown"
-    }
-    color_en = None
-    if m:
-        wear_txt = m.group(2).strip()
-        for k,v in color_map.items():
-            if k in wear_txt: color_en = v; break
-        base = (
-            "Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
-            "Whimsical watercolor storybook style. Primary ethnicity: East Asian features; black hair, dark brown eyes, warm fair skin. "
-            "Signature outfit/items must appear on the main character only."
-        )
-        user_character_sheet[user_id] = (
-            f"{base} Main character always wears/has: {wear_txt}. "
-            f"Use exactly this outfit in every scene unless the user changes it."
-        )
-        print("✨ 角色設定卡（於畫圖時即時更新）:", user_character_sheet[user_id])
-    return wear_txt, color_en
-
-def _neg_for_color(lock_color):
-    if not lock_color: return ""
-    all_colors = ["pink","red","blue","green","yellow","white","black","purple","orange","brown"]
-    bad = [c for c in all_colors if c != lock_color]
-    ban = []
-    for c in bad:
-        ban += [f"{c} dress", f"{c} skirt", f"{c} clothes", f"{c} outfit", f"{c} clothing"]
-    return ", " + ", ".join(ban)
-
 # ---------- 圖像 Prompt ----------
 def build_image_prompt(user_id, scene_brief, user_extra_desc=""):
     character = user_character_sheet.get(user_id) or (
@@ -232,11 +197,16 @@ def build_image_prompt(user_id, scene_brief, user_extra_desc=""):
         "Signature outfit/items must appear on the main character only."
     )
     world = get_world(user_id)
+
+    # 柔性導引，避免白底人像
+    style_guard = (
+        "family-friendly, wholesome, uplifting tone, modest clothing, safe for work, non-violent. "
+        "Full-scene composition; avoid centered portrait; avoid plain white background; show environment and story action."
+    )
+
     parts = [
         character,
-        "family-friendly, wholesome, uplifting tone, modest clothing, safe for work, non-violent.",
-        "Full-scene composition; include environment and story action; avoid centered portrait.",
-        "No plain white background, no studio backdrop, no collage, no character lineup.",
+        style_guard,
         f"Scene description: setting: {scene_brief.get('setting', world['setting'])}, ",
         f"time of day: {scene_brief.get('time_of_day', world['time_of_day'])}, ",
         f"mood: {scene_brief.get('mood', world['mood'])}, ",
@@ -248,12 +218,14 @@ def build_image_prompt(user_id, scene_brief, user_extra_desc=""):
     ]
     if user_extra_desc:
         parts.append(f"User additions: {user_extra_desc}")
+
     prompt = " ".join(parts)
-    neg = ("text, letters, words, captions, subtitles, watermark, signature, "
-           "different character, multiple different versions of the same character, character lineup, collage, cutout, "
-           "plain white background, studio background, poster, ID photo, close-up portrait only, "
-           "change hairstyle, change outfit, age change, gender change, "
-           "blonde hair, red hair, light brown hair, blue eyes, green eyes, non-East-Asian facial features")
+
+    # 負面詞：放寬顏色限制，避免生成失敗；仍禁止文字與單純棚拍
+    neg = (
+        "text, letters, words, captions, subtitles, watermark, signature, "
+        "studio background, poster layout, close-up headshot only"
+    )
     return prompt, neg
 
 # ---------- Leonardo 調用 ----------
@@ -273,34 +245,40 @@ def leonardo_tti(payload):
     data = r.json()
     return data["sdGenerationJob"]["generationId"]
 
-def leonardo_poll(gen_id, timeout=180):
+def leonardo_poll(gen_id, timeout=150):
     url = f"{LEO_BASE}/generations/{gen_id}"
     start = time.time()
     while time.time()-start < timeout:
         time.sleep(4)
-        r = requests.get(url, headers=leonardo_headers(), timeout=30)
-        if not r.ok:
-            print("❌ Leonardo GET 失敗:", r.status_code, r.text)
-            continue
-        data = r.json()
-        # 兼容兩種格式
-        if data.get("generations_v2"):
-            g = data["generations_v2"][0]
-            status = g.get("status")
-            if status == "COMPLETE":
-                gi = g["generated_images"][0]
-                return gi.get("url"), gi.get("id")
-            elif status == "FAILED":
-                return None, None
-        elif data.get("generations_by_pk"):
-            g = data["generations_by_pk"]
-            status = g.get("status")
-            if status == "COMPLETE":
-                gi = g["generated_images"][0]
-                return gi.get("url"), gi.get("id")
-            elif status == "FAILED":
-                return None, None
-    print("⏰ Leonardo 輪詢超時")
+        try:
+            r = requests.get(url, headers=leonardo_headers(), timeout=30)
+            if not r.ok:
+                print(f"❌ Leonardo GET 失敗: {r.status_code}, {r.text}")
+                continue
+            r.raise_for_status()
+            data = r.json()
+
+            # 回應格式（官方目前返回 generations_by_pk）
+            if data.get("generations_by_pk"):
+                generation_data = data["generations_by_pk"]
+                status = generation_data.get("status")
+                if status == "COMPLETE":
+                    generated_images = generation_data.get("generated_images", [])
+                    if generated_images:
+                        gi = generated_images[0]
+                        return gi.get("url"), gi.get("id")
+                    else:
+                        print("❌ 沒有找到生成的圖片")
+                        return None, None
+                elif status == "FAILED":
+                    print("❌ 圖片生成失敗")
+                    return None, None
+            else:
+                print(f"⚠️ 回應格式異常: {data}")
+        except Exception as e:
+            print(f"❌ 檢查狀態時發生錯誤: {e}")
+            traceback.print_exc()
+    print(f"⏰ 輪詢超時 ({timeout}s)，生成 ID: {gen_id}")
     return None, None
 
 def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_image_id=None, init_strength=None):
@@ -315,10 +293,9 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
         "negative_prompt": negative_prompt,
         "seed": int(seed)
     }
+    # 正確的 i2i 參數鍵名
     if init_image_id and init_strength:
-        # 正確的 img2img 參數鍵
-        payload["isInitImage"] = True
-        payload["init_generation_image_id"] = init_image_id
+        payload["init_image_id"] = init_image_id
         payload["init_strength"] = float(init_strength)
 
     print("🎨 Leonardo payload =>", json.dumps(payload, ensure_ascii=False))
@@ -330,14 +307,17 @@ def generate_leonardo_image(*, user_id, prompt, negative_prompt, seed, init_imag
             gcs_url = upload_to_gcs_from_url(url, user_id, prompt)
             return {"url": gcs_url, "image_id": image_id}
     except requests.HTTPError as e:
-        # 若 API 拒絕 img2img 參數，降級為純文生圖
+        # 後備：若 API 拒絕了 i2i 參數格式，降級為純 t2i
         if init_image_id and "Unexpected variable" in str(e):
             print("↩️ 自動降級：改用 text-to-image 重試（保留 seed 與 prompt）")
             return generate_leonardo_image(
                 user_id=user_id, prompt=prompt, negative_prompt=negative_prompt,
                 seed=seed, init_image_id=None, init_strength=None
             )
-        print("❌ Leonardo 例外：", e)
+        print("❌ Leonardo HTTP 錯誤：", e)
+    except Exception as e:
+        print(f"❌ Leonardo 其他錯誤：{e}")
+        traceback.print_exc()
     return None
 
 # ---------- 引導與格式 ----------
@@ -397,22 +377,22 @@ def bg_generate_and_push_draw(user_id, n, extra_desc):
     with GEN_SEMAPHORE:
         try:
             sess = user_sessions.setdefault(user_id, {"messages": [], "story_mode": True, "summary": "", "paras": []})
-            # 先取 Firestore；取不到再臨時整理（過濾噪音）
+
+            # 優先用 Firestore 的 5 段；沒有才臨時整理
             paras = load_latest_story_paragraphs(user_id) or sess.get("paras") or []
             if not paras:
-                draw_pat = r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)"
-                noise = re.compile(draw_pat + r"|整理|總結|summary|定妝")
+                # 只抽取故事性使用者訊息做一次性整理
+                draw_pat2 = r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)"
+                noise = re.compile(draw_pat2 + r"|整理|總結|summary|定妝")
                 story_user_texts = [m["content"] for m in sess["messages"]
                                     if m.get("role")=="user" and not noise.search(m.get("content",""))]
-                compact_msgs = [{"role":"user","content":"\n".join(story_user_texts[-8:])}]
-                summary = generate_story_summary(compact_msgs)
-                sess["summary"] = summary
-                paras = extract_paragraphs(summary)
-                sess["paras"] = paras
-                if paras:
-                    save_story_summary(user_id, paras)
-                    # 回讀確認
-                    _ = load_latest_story_paragraphs(user_id)
+                if story_user_texts:
+                    compact_msgs = [{"role":"user","content":"\n".join(story_user_texts[-8:])}]
+                    summary = generate_story_summary(compact_msgs)
+                    sess["summary"] = summary
+                    paras = extract_paragraphs(summary)
+                    sess["paras"] = paras
+                    if paras: save_story_summary(user_id, paras)
 
             if not paras or n >= len(paras):
                 line_bot_api.push_message(user_id, TextSendMessage("資訊不足，這段再給我一些細節好嗎？"))
@@ -424,21 +404,25 @@ def bg_generate_and_push_draw(user_id, n, extra_desc):
                 user_scene_briefs[user_id] = [build_scene_brief(p, world) for p in paras]
             scene = user_scene_briefs[user_id][n]
 
-            # 解析穿著並即時更新角色卡 + 鎖顏色
-            outfit_txt, color_en = _extract_outfit_and_update_sheet(user_id, extra_desc)
+            # prompt
             prompt, neg = build_image_prompt(user_id, scene, extra_desc)
-            if color_en:
-                neg = (neg or "") + _neg_for_color(color_en)
-                prompt += f" The main character's clothing color must be {color_en}."
 
-            ref_id = user_definitive_imgid.get(user_id)
             seed   = user_fixed_seed.setdefault(user_id, random.randint(100000,999999))
+
+            # —— 重點：首次或明確換衣色 → 先不用 img2img（避免被定妝照拉回舊色）
+            ref_id = user_definitive_imgid.get(user_id)
+            use_init = bool(ref_id)
+            if n == 0 or ("粉" in (extra_desc or "")) or ("pink" in (extra_desc or "")):
+                use_init = False
 
             result = generate_leonardo_image(
                 user_id=user_id, prompt=prompt, negative_prompt=neg,
-                seed=seed, init_image_id=ref_id, init_strength=0.24 if ref_id else None
+                seed=seed,
+                init_image_id=(ref_id if use_init else None),
+                init_strength=(0.24 if (use_init and ref_id) else None)
             )
             if result and result["url"]:
+                # 更新下一張的參考
                 user_definitive_imgid[user_id] = result.get("image_id", ref_id) or ref_id
                 user_definitive_url[user_id]   = result["url"]
                 line_bot_api.push_message(user_id, [
@@ -511,19 +495,21 @@ def handle_message(event):
         if len(sess["messages"]) > 60: sess["messages"] = sess["messages"][-60:]
         save_chat(user_id, "user", text)
 
-        # 使用者指定穿搭 → 立即更新設定卡（如果單獨提）
-        if re.search(r"(穿|戴|頭上|衣|裙|襯衫|鞋|配件)", text) and not re.search(r"(幫我畫第|請畫第|畫第)", text):
-            _extract_outfit_and_update_sheet(user_id, text)
+        # 使用者指定穿搭 → 更新設定卡（保留原敘述，Prompt 能吃中文顏色）
+        if re.search(r"(穿|戴|頭上|衣|裙|襯衫|鞋|配件)", text):
+            m = re.search(r"(穿|戴)(.+)", text)
+            wear_txt = m.group(2).strip() if m else text
+            user_character_sheet[user_id] = (
+                "Consistent main character across all images. Same face, hairstyle, clothing, colors, proportions. "
+                "Whimsical watercolor storybook style. Primary ethnicity: East Asian features; black hair, dark brown eyes, warm fair skin. "
+                f"Main character always wears/has: {wear_txt}. Only the main character has these signature items."
+            )
+            print("✨ 角色設定卡已更新:", user_character_sheet[user_id])
 
         # 整理 / 總結（只在要求時）
         if re.search(r"(整理|總結|summary)", text):
-            # 只抽使用者的敘事（過濾指令噪音）
-            draw_pat = r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)"
-            noise = re.compile(draw_pat + r"|整理|總結|summary|定妝")
-            story_user_texts = [m["content"] for m in sess["messages"]
-                                if m.get("role")=="user" and not noise.search(m.get("content",""))]
-            compact_msgs = [{"role":"user","content":"\n".join(story_user_texts[-8:])}]
-            summary = generate_story_summary(compact_msgs)
+            msgs = [{"role":"system","content":base_system_prompt}] + sess["messages"][-40:]
+            summary = generate_story_summary(msgs)
             sess["summary"] = summary
             paras = extract_paragraphs(summary)
             sess["paras"] = paras
@@ -542,19 +528,41 @@ def handle_message(event):
             threading.Thread(target=bg_generate_and_push_portrait, args=(user_id,), daemon=True).start()
             return
 
-        # 畫第 N 段（背景生成 → push）
+        # 畫第 N 段（先確保段落，再回覆並開背景）
         draw_pat = r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)"
         if re.search(draw_pat, text):
             m = re.search(r"[一二三四五12345]", text)
             idx_map = {'一':1,'二':2,'三':3,'四':4,'五':5,'1':1,'2':2,'3':3,'4':4,'5':5}
             n = idx_map.get(m.group(0),1) - 1
             extra = re.sub(draw_pat, "", text).strip(" ，,。.!！")
+
+            # —— 先同步確保 Firestore 有 5 段（避免背景才去整理導致空場景）
+            paras = load_latest_story_paragraphs(user_id)
+            if not paras:
+                draw_pat2 = r"(幫我畫第[一二三四五12345]段故事的圖|請畫第[一二三四五12345]段故事的插圖|畫第[一二三四五12345]段故事的圖)"
+                noise = re.compile(draw_pat2 + r"|整理|總結|summary|定妝")
+                story_user_texts = [m["content"] for m in sess["messages"]
+                                    if m.get("role")=="user" and not noise.search(m.get("content",""))]
+                if story_user_texts:
+                    compact_msgs = [{"role":"user","content":"\n".join(story_user_texts[-8:])}]
+                    summary = generate_story_summary(compact_msgs)
+                    sess["summary"] = summary
+                    paras = extract_paragraphs(summary)
+                    sess["paras"] = paras
+                    if paras: save_story_summary(user_id, paras)
+
+            if not paras:
+                line_bot_api.reply_message(reply_token, TextSendMessage("我需要再多一點故事內容，才能開始畫第 1 段喔～"))
+                return
+
+            # 再回覆 + 開背景任務
             line_bot_api.reply_message(reply_token, TextSendMessage(f"收到，我開始畫第 {n+1} 段，完成就傳給你～"))
             threading.Thread(target=bg_generate_and_push_draw, args=(user_id,n,extra), daemon=True).start()
             return
 
         # 一般引導
-        msgs = [{"role":"system","content":base_system_prompt}] + sess["messages"][-12:]
+        sysmsg = base_system_prompt
+        msgs = [{"role":"system","content":sysmsg}] + sess["messages"][-12:]
         reply = _chat(msgs, temperature=0.7) or natural_guidance(text)
         reply = format_reply(reply)
         line_bot_api.reply_message(reply_token, TextSendMessage(reply))
