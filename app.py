@@ -20,10 +20,10 @@ sys.stdout.reconfigure(encoding="utf-8")
 # =============== 基礎設定 ===============
 app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET      = os.environ.get("LINE_CHANNEL_SECRET")
-OPENAI_API_KEY           = os.environ.get("OPENAI_API_KEY")
-GCS_BUCKET               = os.environ.get("GCS_BUCKET", "storybotimage")
-IMAGE_SIZE_ENV           = (os.environ.get("IMAGE_SIZE") or "1024x1024").strip()
+LINE_CHANNEL_SECRET       = os.environ.get("LINE_CHANNEL_SECRET")
+OPENAI_API_KEY            = os.environ.get("OPENAI_API_KEY")
+GCS_BUCKET                = os.environ.get("GCS_BUCKET", "storybotimage")
+IMAGE_SIZE_ENV            = (os.environ.get("IMAGE_SIZE") or "1024x1024").strip()
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     log.error("LINE credentials missing.")
@@ -31,7 +31,7 @@ if not OPENAI_API_KEY:
     log.warning("OPENAI_API_KEY is empty; image generation will fail.")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler      = WebhookHandler(LINE_CHANNEL_SECRET)
+handler       = WebhookHandler(LINE_CHANNEL_SECRET)
 log.info("🚀 app boot: public GCS URL mode (Uniform access + bucket public)")
 
 # =============== Firebase / Firestore（容錯） ===============
@@ -123,7 +123,7 @@ def openai_images_generate(prompt: str, size: str):
 
         if _openai_mode == "sdk1":
             resp = _oai_client.images.generate(
-                model="gpt-image-1",
+                model="dall-e-3", # 建議使用 DALL-E 3，效果更佳
                 prompt=prompt,
                 size=size,
             )
@@ -138,7 +138,7 @@ def openai_images_generate(prompt: str, size: str):
                 img_bytes = r.content
         else:
             resp = _oai_client.Image.create(
-                model="gpt-image-1",
+                model="dall-e-3", # 建議使用 DALL-E 3，效果更佳
                 prompt=prompt,
                 size=size,
             )
@@ -164,11 +164,13 @@ def openai_images_generate(prompt: str, size: str):
         return None
 
 # =============== 會話記憶（含角色卡） ===============
-user_sessions = {}  # {uid: {"messages": [...], "paras": [...], "character": {...}, "story_id": "..."}}
+# 修改：將單一角色卡改為多個角色卡的字典
+user_sessions = {}  # {uid: {"messages": [...], "paras": [...], "characters": {...}, "story_id": "..."}}
 user_seeds    = {}
 
 def _ensure_session(user_id):
-    sess = user_sessions.setdefault(user_id, {"messages": [], "paras": [], "character": {}, "story_id": None})
+    # 修改：初始化時使用 'characters' 而非 'character'
+    sess = user_sessions.setdefault(user_id, {"messages": [], "paras": [], "characters": {}, "story_id": None})
     user_seeds.setdefault(user_id, random.randint(100000, 999999))
     if sess.get("story_id") is None:
         sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
@@ -189,7 +191,7 @@ def save_current_story(user_id, sess):
         doc = {
             "story_id": sess.get("story_id"),
             "paragraphs": sess.get("paras", []),
-            "character_card": sess.get("character", {}),
+            "character_cards": sess.get("characters", {}), # 修改：儲存多個角色卡
             "updated_at": firestore.SERVER_TIMESTAMP
         }
         db.collection("users").document(user_id).collection("story").document("current").set(doc)
@@ -204,7 +206,7 @@ def load_current_story(user_id, sess):
             d = doc.to_dict() or {}
             sess["story_id"] = d.get("story_id") or sess.get("story_id")
             sess["paras"]    = d.get("paragraphs") or sess.get("paras", [])
-            sess["character"]= d.get("character_card") or sess.get("character", {})
+            sess["characters"]= d.get("character_cards") or sess.get("characters", {}) # 修改：讀取多個角色卡
     except Exception as e:
         log.warning("⚠️ load_current_story failed: %s", e)
 
@@ -215,23 +217,30 @@ COLOR_MAP = {
     "綠色":"green","綠":"green","黑色":"black","黑":"black","白色":"white","白":"white","粉紅色":"pink","粉紅":"pink","粉":"pink",
     "橘色":"orange","橘":"orange","棕色":"brown","棕":"brown","咖啡色":"brown","咖啡":"brown","灰色":"gray","灰":"gray"
 }
-TOP_WORDS = r"(上衣|衣服|襯衫|T恤|T-shirt|外套|毛衣|連帽衣|風衣)"
+TOP_WORDS = r"(上衣|衣服|襯衫|T恤|T-shirt|外套|毛衣|連帽衣|風衣|裙子|長裙|洋裝)" # 增加更多衣物詞彙
 HAIR_STYLE_WORDS = r"(長髮|短髮|直髮|捲髮|波浪|馬尾|雙馬尾|辮子)"
 GENDER_WORDS = r"(男孩|女孩|男性|女性|男生|女生|哥哥|姊姊|弟弟|妹妹|叔叔|阿姨|爸爸|媽媽)"
 
-def _find_color(text):
-    for zh, en in COLOR_MAP.items():
-        if zh in text:
-            return zh, en
-    return None, None
+# 新增：常用角色名稱列表
+CHARACTER_NAMES = ["小明", "小芳", "傑克", "瑪莉", "主角", "我"] # 可根據需求擴充
+
+def _find_character_name(text):
+    for name in CHARACTER_NAMES:
+        if name in text:
+            return name
+    return None
 
 def maybe_update_character_card(sess, user_id, text):
     """
-    從使用者本輪訊息中抽取外觀線索並更新 sess['character']；同步寫入 Firestore current。
-    僅針對常見特徵做規則抽取：上衣顏色/種類、頭髮顏色/長短/眼鏡/帽子/性別線索。
+    從使用者本輪訊息中抽取外觀線索並更新 sess['characters']；同步寫入 Firestore current。
+    針對常見特徵做規則抽取：上衣顏色/種類、頭髮顏色/長短/眼鏡/帽子/性別線索。
     """
+    # 預設更新「主角」的角色卡
+    char_name = _find_character_name(text) or "主角"
+    
     updated = False
-    card = sess.setdefault("character", {})
+    # 修改：從 'characters' 字典中獲取或創建特定角色的卡片
+    card = sess["characters"].setdefault(char_name, {})
 
     # 1) 上衣/外套 + 顏色
     if re.search(TOP_WORDS, text):
@@ -274,52 +283,75 @@ def maybe_update_character_card(sess, user_id, text):
         updated = True
 
     if updated:
-        log.info("🧬 character_card updated | user=%s | card=%s", user_id, json.dumps(card, ensure_ascii=False))
+        log.info("🧬 character_card updated | user=%s | char=%s | card=%s", user_id, char_name, json.dumps(card, ensure_ascii=False))
         save_current_story(user_id, sess)
 
-def render_character_card_as_text(card: dict) -> str:
+def render_character_card_as_text(characters: dict) -> str:
     """
-    將角色卡渲染為一小段可讀的提示，放進圖像 prompt。
-    盡量簡短，避免喧賓奪主。
+    將多個角色卡渲染為可讀的提示，放進圖像 prompt。
+    為每個角色單獨描述，並加入一致性提示。
     """
-    if not card: return ""
-    parts_zh = []
-    if card.get("top_color_zh") or card.get("top_type_zh"):
-        chunk = "主角"
-        if card.get("top_color_zh"): chunk += f"穿{card['top_color_zh']}"
-        chunk += f"{card.get('top_type_zh','上衣')}"
-        parts_zh.append(chunk)
-    if card.get("hair_color_zh") or card.get("hair_style_zh"):
-        chunk = "頭髮"
-        if card.get("hair_color_zh"): chunk += f"{card['hair_color_zh']}"
-        if card.get("hair_style_zh"): chunk += f"{card['hair_style_zh']}"
-        parts_zh.append(chunk)
-    if card.get("accessory_glasses"):
-        parts_zh.append("戴眼鏡")
-    if card.get("accessory_hat"):
-        parts_zh.append("戴帽子")
-    if card.get("has_beard"):
-        parts_zh.append("留鬍")
-    zh_line = "；".join(parts_zh)
+    if not characters: return ""
+    
+    all_char_zh = []
+    all_char_en = []
+    
+    for char_name, card in characters.items():
+        # 填充預設值以防遺漏
+        card.setdefault("top_type_zh", "上衣")
+        card.setdefault("hair_style_zh", "頭髮")
+        
+        parts_zh = [f"{char_name}"]
+        parts_en = [f"{char_name}"]
 
-    parts_en = []
-    if card.get("top_color_en"):
-        parts_en.append(f"wears a {card['top_color_en']} top")
-    if card.get("hair_color_en"):
-        parts_en.append(f"{card['hair_color_en']} hair")
-    if card.get("hair_style_zh"):
-        parts_en.append(card["hair_style_zh"])
-    if card.get("accessory_glasses"):
-        parts_en.append("wears glasses")
-    if card.get("accessory_hat"):
-        parts_en.append("wears a hat")
-    if card.get("has_beard"):
-        parts_en.append("has a beard")
-    en_line = ", ".join(parts_en)
+        # 處理中文描述
+        if card.get("gender_hint_zh"):
+            parts_zh.append(f"是{card['gender_hint_zh']}")
+        
+        # 盡量讓描述流暢
+        clothing_desc = ""
+        if card.get("top_color_zh"):
+            clothing_desc += f"穿著{card['top_color_zh']}"
+        clothing_desc += f"{card['top_type_zh']}" if card.get("top_type_zh") else ""
+        if clothing_desc: parts_zh.append(clothing_desc)
+        
+        hair_desc = ""
+        if card.get("hair_color_zh"):
+            hair_desc += f"{card['hair_color_zh']}"
+        if card.get("hair_style_zh"):
+            hair_desc += f"{card['hair_style_zh']}"
+        if hair_desc: parts_zh.append(f"有{hair_desc}")
+            
+        accessories_desc = []
+        if card.get("accessory_glasses"): accessories_desc.append("戴眼鏡")
+        if card.get("accessory_hat"): accessories_desc.append("戴帽子")
+        if card.get("has_beard"): accessories_desc.append("留鬍子")
+        if accessories_desc: parts_zh.append("，".join(accessories_desc))
+            
+        all_char_zh.append("".join(parts_zh))
+
+        # 處理英文描述
+        if card.get("top_color_en") or card.get("top_type_zh"):
+            parts_en.append(f"wears a {card.get('top_color_en','')} {card.get('top_type_zh','top')}")
+        if card.get("hair_color_en"):
+            parts_en.append(f"has {card['hair_color_en']} hair")
+        if card.get("hair_style_zh"):
+            parts_en.append(card["hair_style_zh"])
+        if card.get("accessory_glasses"):
+            parts_en.append("wears glasses")
+        if card.get("accessory_hat"):
+            parts_en.append("wears a hat")
+        if card.get("has_beard"):
+            parts_en.append("has a beard")
+        
+        all_char_en.append(f"{char_name}: " + ", ".join(parts_en))
+
+    zh_line = "、".join(all_char_zh) + "。"
+    en_line = " | ".join(all_char_en) + ". Keep character appearances consistent across scenes."
 
     out = []
-    if zh_line: out.append(f"角色特徵：{zh_line}。")
-    if en_line: out.append(f"Main character: {en_line}. Keep character appearance consistent.")
+    if zh_line and zh_line != "主角。": out.append(f"角色特徵：{zh_line}")
+    if en_line: out.append(en_line)
     return " ".join(out)
 
 # =============== 摘要與分段 ===============
@@ -359,7 +391,7 @@ BASE_STYLE = (
 def build_scene_prompt(scene_desc: str, char_hint: str = "", extra: str = ""):
     parts = [BASE_STYLE, f"Scene: {scene_desc}"]
     if char_hint: parts.append(char_hint)
-    if extra:     parts.append(extra)
+    if extra:      parts.append(extra)
     return " ".join(parts)
 
 # =============== Flask routes ===============
@@ -412,7 +444,7 @@ def handle_message(event):
         paras = extract_paragraphs(summary)
         sess["paras"] = paras
         sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
-        sess["character"] = {}  # 新故事重置角色卡
+        sess["characters"] = {}  # 新故事重置角色卡
         save_current_story(user_id, sess)
         line_bot_api.reply_message(reply_token, TextSendMessage("✨ 故事總結完成：\n" + summary))
         save_chat(user_id, "assistant", summary)
@@ -459,7 +491,8 @@ def _draw_and_push(user_id, idx, extra):
             return
 
         scene = paras[idx]
-        char_hint = render_character_card_as_text(sess.get("character", {}))
+        # 修改：將多個角色卡傳入生成提示
+        char_hint = render_character_card_as_text(sess.get("characters", {}))
         prompt = build_scene_prompt(scene_desc=scene, char_hint=char_hint, extra=extra)
         log.info("🧩 [bg] prompt head: %s", prompt[:200])
 
