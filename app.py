@@ -1,11 +1,9 @@
 import os, sys, json, re, time, uuid, random, traceback, threading
-from datetime import datetime, timedelta
-
+from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
-
 import requests
 import logging
 
@@ -17,16 +15,15 @@ logging.basicConfig(
     force=True,
 )
 log = logging.getLogger("app")
+sys.stdout.reconfigure(encoding="utf-8")
 
 # =============== 基礎設定 ===============
-sys.stdout.reconfigure(encoding="utf-8")
 app = Flask(__name__)
-
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET      = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY           = os.environ.get("OPENAI_API_KEY")
 GCS_BUCKET               = os.environ.get("GCS_BUCKET", "storybotimage")
-IMAGE_SIZE               = os.environ.get("IMAGE_SIZE", "1024x1024").strip()
+IMAGE_SIZE_ENV           = (os.environ.get("IMAGE_SIZE") or "1024x1024").strip()
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     log.error("LINE credentials missing.")
@@ -35,7 +32,6 @@ if not OPENAI_API_KEY:
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler      = WebhookHandler(LINE_CHANNEL_SECRET)
-
 log.info("🚀 app boot: public GCS URL mode (Uniform access + bucket public)")
 
 # =============== Firebase / Firestore（容錯） ===============
@@ -109,7 +105,17 @@ def _init_openai():
 
 _init_openai()
 
-def openai_images_generate(prompt: str, size: str = "1024x1024"):
+ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+
+def _normalize_size(size: str) -> str:
+    size = (size or "").strip()
+    if size not in ALLOWED_SIZES:
+        log.warning("⚠️ IMAGE_SIZE=%s not supported; fallback -> 1024x1024", size)
+        return "1024x1024"
+    return size
+
+def openai_images_generate(prompt: str, size: str):
+    size = _normalize_size(size)
     try:
         t0 = time.time()
         log.info("🖼️ images.generate start | size=%s | prompt_len=%d", size, len(prompt))
@@ -157,18 +163,19 @@ def openai_images_generate(prompt: str, size: str = "1024x1024"):
         log.exception("💥 images.generate error: %s", e)
         return None
 
-# =============== 會話記憶 ===============
-user_sessions = {}
+# =============== 會話記憶（含角色卡） ===============
+user_sessions = {}  # {uid: {"messages": [...], "paras": [...], "character": {...}, "story_id": "..."}}
 user_seeds    = {}
 
 def _ensure_session(user_id):
-    sess = user_sessions.setdefault(user_id, {"messages": [], "paras": []})
+    sess = user_sessions.setdefault(user_id, {"messages": [], "paras": [], "character": {}, "story_id": None})
     user_seeds.setdefault(user_id, random.randint(100000, 999999))
+    if sess.get("story_id") is None:
+        sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
     return sess
 
 def save_chat(user_id, role, text):
-    if not db:
-        return
+    if not db: return
     try:
         db.collection("users").document(user_id).collection("chat").add({
             "role": role, "text": text, "timestamp": firestore.SERVER_TIMESTAMP
@@ -176,28 +183,144 @@ def save_chat(user_id, role, text):
     except Exception as e:
         log.warning("⚠️ save_chat failed: %s", e)
 
-def save_story_summary(user_id, paragraphs):
-    if not db:
-        return
+def save_current_story(user_id, sess):
+    if not db: return
     try:
-        db.collection("users").document(user_id).collection("story")\
-          .document("latest_summary").set({
-            "paragraphs": paragraphs, "updated_at": firestore.SERVER_TIMESTAMP
-          })
+        doc = {
+            "story_id": sess.get("story_id"),
+            "paragraphs": sess.get("paras", []),
+            "character_card": sess.get("character", {}),
+            "updated_at": firestore.SERVER_TIMESTAMP
+        }
+        db.collection("users").document(user_id).collection("story").document("current").set(doc)
     except Exception as e:
-        log.warning("⚠️ save_story_summary failed: %s", e)
+        log.warning("⚠️ save_current_story failed: %s", e)
 
-def load_latest_story_paragraphs(user_id):
-    if not db:
-        return None
+def load_current_story(user_id, sess):
+    if not db: return
     try:
-        doc = db.collection("users").document(user_id).collection("story")\
-               .document("latest_summary").get()
+        doc = db.collection("users").document(user_id).collection("story").document("current").get()
         if doc.exists:
-            return (doc.to_dict().get("paragraphs") or [])[:5]
+            d = doc.to_dict() or {}
+            sess["story_id"] = d.get("story_id") or sess.get("story_id")
+            sess["paras"]    = d.get("paragraphs") or sess.get("paras", [])
+            sess["character"]= d.get("character_card") or sess.get("character", {})
     except Exception as e:
-        log.warning("⚠️ load_latest_story_paragraphs failed: %s", e)
-    return None
+        log.warning("⚠️ load_current_story failed: %s", e)
+
+# =============== 角色卡抽取（中文規則） ===============
+# 顏色映射（中 -> 英，供提示更穩定）
+COLOR_MAP = {
+    "紫色":"purple","紫":"purple","黃色":"yellow","黃":"yellow","紅色":"red","紅":"red","藍色":"blue","藍":"blue",
+    "綠色":"green","綠":"green","黑色":"black","黑":"black","白色":"white","白":"white","粉紅色":"pink","粉紅":"pink","粉":"pink",
+    "橘色":"orange","橘":"orange","棕色":"brown","棕":"brown","咖啡色":"brown","咖啡":"brown","灰色":"gray","灰":"gray"
+}
+TOP_WORDS = r"(上衣|衣服|襯衫|T恤|T-shirt|外套|毛衣|連帽衣|風衣)"
+HAIR_STYLE_WORDS = r"(長髮|短髮|直髮|捲髮|波浪|馬尾|雙馬尾|辮子)"
+GENDER_WORDS = r"(男孩|女孩|男性|女性|男生|女生|哥哥|姊姊|弟弟|妹妹|叔叔|阿姨|爸爸|媽媽)"
+
+def _find_color(text):
+    for zh, en in COLOR_MAP.items():
+        if zh in text:
+            return zh, en
+    return None, None
+
+def maybe_update_character_card(sess, user_id, text):
+    """
+    從使用者本輪訊息中抽取外觀線索並更新 sess['character']；同步寫入 Firestore current。
+    僅針對常見特徵做規則抽取：上衣顏色/種類、頭髮顏色/長短/眼鏡/帽子/性別線索。
+    """
+    updated = False
+    card = sess.setdefault("character", {})
+
+    # 1) 上衣/外套 + 顏色
+    if re.search(TOP_WORDS, text):
+        zh, en = _find_color(text)
+        if zh:
+            card["top_color_zh"] = zh
+            card["top_color_en"] = en
+            updated = True
+        m_top = re.search(TOP_WORDS, text)
+        if m_top:
+            card["top_type_zh"] = m_top.group(1)
+            updated = True
+
+    # 2) 頭髮顏色/長短
+    if "髮" in text or "頭髮" in text:
+        zh, en = _find_color(text)
+        if zh:
+            card["hair_color_zh"] = zh
+            card["hair_color_en"] = en
+            updated = True
+        m_style = re.search(HAIR_STYLE_WORDS, text)
+        if m_style:
+            card["hair_style_zh"] = m_style.group(1)
+            updated = True
+
+    # 3) 眼鏡 / 帽子 / 鬍子
+    if re.search(r"(戴|配).*(眼鏡)", text):
+        card["accessory_glasses"] = True
+        updated = True
+    if re.search(r"(戴|戴著).*(帽|帽子)", text):
+        card["accessory_hat"] = True
+        updated = True
+    if re.search(r"(留鬍|有鬍|鬍子)", text):
+        card["has_beard"] = True
+        updated = True
+
+    # 4) 性別/年齡線索（僅做弱提示）
+    if re.search(GENDER_WORDS, text):
+        card["gender_hint_zh"] = re.search(GENDER_WORDS, text).group(1)
+        updated = True
+
+    if updated:
+        log.info("🧬 character_card updated | user=%s | card=%s", user_id, json.dumps(card, ensure_ascii=False))
+        save_current_story(user_id, sess)
+
+def render_character_card_as_text(card: dict) -> str:
+    """
+    將角色卡渲染為一小段可讀的提示，放進圖像 prompt。
+    盡量簡短，避免喧賓奪主。
+    """
+    if not card: return ""
+    parts_zh = []
+    if card.get("top_color_zh") or card.get("top_type_zh"):
+        chunk = "主角"
+        if card.get("top_color_zh"): chunk += f"穿{card['top_color_zh']}"
+        chunk += f"{card.get('top_type_zh','上衣')}"
+        parts_zh.append(chunk)
+    if card.get("hair_color_zh") or card.get("hair_style_zh"):
+        chunk = "頭髮"
+        if card.get("hair_color_zh"): chunk += f"{card['hair_color_zh']}"
+        if card.get("hair_style_zh"): chunk += f"{card['hair_style_zh']}"
+        parts_zh.append(chunk)
+    if card.get("accessory_glasses"):
+        parts_zh.append("戴眼鏡")
+    if card.get("accessory_hat"):
+        parts_zh.append("戴帽子")
+    if card.get("has_beard"):
+        parts_zh.append("留鬍")
+    zh_line = "；".join(parts_zh)
+
+    parts_en = []
+    if card.get("top_color_en"):
+        parts_en.append(f"wears a {card['top_color_en']} top")
+    if card.get("hair_color_en"):
+        parts_en.append(f"{card['hair_color_en']} hair")
+    if card.get("hair_style_zh"):
+        parts_en.append(card["hair_style_zh"])
+    if card.get("accessory_glasses"):
+        parts_en.append("wears glasses")
+    if card.get("accessory_hat"):
+        parts_en.append("wears a hat")
+    if card.get("has_beard"):
+        parts_en.append("has a beard")
+    en_line = ", ".join(parts_en)
+
+    out = []
+    if zh_line: out.append(f"角色特徵：{zh_line}。")
+    if en_line: out.append(f"Main character: {en_line}. Keep character appearance consistent.")
+    return " ".join(out)
 
 # =============== 摘要與分段 ===============
 def generate_story_summary(messages):
@@ -222,8 +345,7 @@ def generate_story_summary(messages):
         return None
 
 def extract_paragraphs(summary):
-    if not summary:
-        return []
+    if not summary: return []
     lines = [re.sub(r"^\d+\.?\s*", "", x.strip()) for x in summary.split("\n") if x.strip()]
     return lines[:5]
 
@@ -234,10 +356,10 @@ BASE_STYLE = (
     "No text, letters, logos, watermarks, signage, or brand names."
 )
 
-def build_scene_prompt(main_desc: str, extra: str = ""):
-    parts = [BASE_STYLE, main_desc]
-    if extra:
-        parts.append(extra)
+def build_scene_prompt(scene_desc: str, char_hint: str = "", extra: str = ""):
+    parts = [BASE_STYLE, f"Scene: {scene_desc}"]
+    if char_hint: parts.append(char_hint)
+    if extra:     parts.append(extra)
     return " ".join(parts)
 
 # =============== Flask routes ===============
@@ -271,36 +393,44 @@ def handle_message(event):
     text = (event.message.text or "").strip()
     log.info("📩 LINE text | user=%s | text=%s", user_id, text)
 
-    reply_token = event.reply_token
     sess = _ensure_session(user_id)
+    load_current_story(user_id, sess)  # 取回可能已有的 current
     sess["messages"].append({"role": "user", "content": text})
     if len(sess["messages"]) > 60:
         sess["messages"] = sess["messages"][-60:]
     save_chat(user_id, "user", text)
 
+    # 先嘗試從本輪訊息抽取角色卡線索（即時更新）
+    maybe_update_character_card(sess, user_id, text)
+
+    reply_token = event.reply_token
+
+    # 整理/總結 -> 建立新故事、重置角色卡
     if re.search(r"(整理|總結|summary)", text):
         compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
         summary = generate_story_summary(compact) or "1.\n2.\n3.\n4.\n5."
         paras = extract_paragraphs(summary)
         sess["paras"] = paras
-        save_story_summary(user_id, paras)
+        sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
+        sess["character"] = {}  # 新故事重置角色卡
+        save_current_story(user_id, sess)
         line_bot_api.reply_message(reply_token, TextSendMessage("✨ 故事總結完成：\n" + summary))
         save_chat(user_id, "assistant", summary)
         return
 
+    # 畫第N段
     m = re.search(r"(畫|請畫|幫我畫)第([一二三四五12345])段", text)
     if m:
         n_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
                  '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
         idx = n_map[m.group(2)] - 1
         extra = re.sub(r"(畫|請畫|幫我畫)第[一二三四五12345]段", "", text).strip(" ，,。.!！")
-        # 先回覆
         line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！第 {idx+1} 段開始生成，完成後會再傳給你～"))
-        # 背景生成
         threading.Thread(target=_draw_and_push, args=(user_id, idx, extra), daemon=True).start()
         return
 
-    line_bot_api.reply_message(reply_token, TextSendMessage("我懂了！想再補充一點嗎？主角是誰？在哪裡？想發生什麼？"))
+    # 引導
+    line_bot_api.reply_message(reply_token, TextSendMessage("我懂了！想再補充一點嗎？主角長相/服裝/道具想怎麼設定？"))
     save_chat(user_id, "assistant", "引導")
 
 @handler.add(MessageEvent)
@@ -314,33 +444,46 @@ def handle_non_text(event):
         pass
 
 # =============== 背景生成並 push ===============
-def _get_paragraphs_for_user(user_id, sess):
-    return load_latest_story_paragraphs(user_id) or sess.get("paras") or []
+def _get_paragraphs_for_user(sess):
+    return sess.get("paras") or []
 
 def _draw_and_push(user_id, idx, extra):
     try:
-        log.info("🎯 [bg] draw request | user=%s | idx=%d | extra=%s", user_id, idx, extra)
         sess = _ensure_session(user_id)
-        paras = _get_paragraphs_for_user(user_id, sess)
+        load_current_story(user_id, sess)
+        log.info("🎯 [bg] draw request | user=%s | idx=%d | extra=%s | story_id=%s", user_id, idx, extra, sess.get("story_id"))
+
+        paras = _get_paragraphs_for_user(sess)
         if not paras or idx >= len(paras):
             line_bot_api.push_message(user_id, TextSendMessage("我需要再多一點故事內容，才能開始畫喔～"))
             return
+
         scene = paras[idx]
-        prompt = build_scene_prompt(f"Scene: {scene}", extra)
-        img_bytes = openai_images_generate(prompt, size=IMAGE_SIZE)
+        char_hint = render_character_card_as_text(sess.get("character", {}))
+        prompt = build_scene_prompt(scene_desc=scene, char_hint=char_hint, extra=extra)
+        log.info("🧩 [bg] prompt head: %s", prompt[:200])
+
+        size = _normalize_size(IMAGE_SIZE_ENV)
+        img_bytes = openai_images_generate(prompt, size=size)
         if not img_bytes:
             line_bot_api.push_message(user_id, TextSendMessage("圖片生成暫時失敗了，稍後再試一次可以嗎？"))
             return
+
         fname = f"line_images/{user_id}-{uuid.uuid4().hex[:6]}_s{idx+1}.png"
         public_url = gcs_upload_bytes(img_bytes, fname, "image/png")
         if not public_url:
             line_bot_api.push_message(user_id, TextSendMessage("上傳圖片時出了點狀況，等等再請我重畫一次～"))
             return
+
         msgs = [
-            TextSendMessage(f"第 {idx+1} 段完成了！（{IMAGE_SIZE}）"),
+            TextSendMessage(f"第 {idx+1} 段完成了！（{size}）"),
             ImageSendMessage(public_url, public_url),
         ]
         line_bot_api.push_message(user_id, msgs)
+        log.info("✅ [bg] push image sent | user=%s | url=%s", user_id, public_url)
+
+        save_chat(user_id, "assistant", f"[image]{public_url}")
+
     except Exception as e:
         log.exception("💥 [bg] draw fail: %s", e)
         try:
