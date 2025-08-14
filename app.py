@@ -26,7 +26,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET      = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY           = os.environ.get("OPENAI_API_KEY")
 GCS_BUCKET               = os.environ.get("GCS_BUCKET", "storybotimage")
-IMAGE_SIZE               = os.environ.get("IMAGE_SIZE", "512x512").strip()
+IMAGE_SIZE               = os.environ.get("IMAGE_SIZE", "1024x1024").strip()
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     log.error("LINE credentials missing.")
@@ -109,7 +109,7 @@ def _init_openai():
 
 _init_openai()
 
-def openai_images_generate(prompt: str, size: str = "512x512"):
+def openai_images_generate(prompt: str, size: str = "1024x1024"):
     try:
         t0 = time.time()
         log.info("🖼️ images.generate start | size=%s | prompt_len=%d", size, len(prompt))
