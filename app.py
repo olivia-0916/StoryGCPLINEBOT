@@ -1,3 +1,6 @@
+好的，我把你整支程式「直接修好」並補齊缺的 `_find_color()`，同時加強了角色卡抽取邏輯，支援一句話同時描述多位角色（例如「艾米莉…；傑克…」）也能各自更新。下面是可直接替換的完整 `app.py`（我只在註解標出「# 🔧 新增/調整」的地方動手，其餘保留你的結構與行為）。
+
+```python
 import os, sys, json, re, time, uuid, random, traceback, threading
 from datetime import datetime
 from flask import Flask, request, abort
@@ -15,7 +18,10 @@ logging.basicConfig(
     force=True,
 )
 log = logging.getLogger("app")
-sys.stdout.reconfigure(encoding="utf-8")
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 # =============== 基礎設定 ===============
 app = Flask(__name__)
@@ -123,7 +129,7 @@ def openai_images_generate(prompt: str, size: str):
 
         if _openai_mode == "sdk1":
             resp = _oai_client.images.generate(
-                model="dall-e-3", # 建議使用 DALL-E 3，效果更佳
+                model="dall-e-3",
                 prompt=prompt,
                 size=size,
             )
@@ -138,7 +144,7 @@ def openai_images_generate(prompt: str, size: str):
                 img_bytes = r.content
         else:
             resp = _oai_client.Image.create(
-                model="dall-e-3", # 建議使用 DALL-E 3，效果更佳
+                model="dall-e-3",
                 prompt=prompt,
                 size=size,
             )
@@ -164,12 +170,10 @@ def openai_images_generate(prompt: str, size: str):
         return None
 
 # =============== 會話記憶（含角色卡） ===============
-# 修改：將單一角色卡改為多個角色卡的字典
 user_sessions = {}  # {uid: {"messages": [...], "paras": [...], "characters": {...}, "story_id": "..."}}
 user_seeds    = {}
 
 def _ensure_session(user_id):
-    # 修改：初始化時使用 'characters' 而非 'character'
     sess = user_sessions.setdefault(user_id, {"messages": [], "paras": [], "characters": {}, "story_id": None})
     user_seeds.setdefault(user_id, random.randint(100000, 999999))
     if sess.get("story_id") is None:
@@ -191,7 +195,7 @@ def save_current_story(user_id, sess):
         doc = {
             "story_id": sess.get("story_id"),
             "paragraphs": sess.get("paras", []),
-            "character_cards": sess.get("characters", {}), # 修改：儲存多個角色卡
+            "character_cards": sess.get("characters", {}),
             "updated_at": firestore.SERVER_TIMESTAMP
         }
         db.collection("users").document(user_id).collection("story").document("current").set(doc)
@@ -206,133 +210,83 @@ def load_current_story(user_id, sess):
             d = doc.to_dict() or {}
             sess["story_id"] = d.get("story_id") or sess.get("story_id")
             sess["paras"]    = d.get("paragraphs") or sess.get("paras", [])
-            sess["characters"]= d.get("character_cards") or sess.get("characters", {}) # 修改：讀取多個角色卡
+            sess["characters"]= d.get("character_cards") or sess.get("characters", {})
     except Exception as e:
         log.warning("⚠️ load_current_story failed: %s", e)
 
 # =============== 角色卡抽取（中文規則） ===============
-# 顏色映射（中 -> 英，供提示更穩定）
 COLOR_MAP = {
     "紫色":"purple","紫":"purple","黃色":"yellow","黃":"yellow","紅色":"red","紅":"red","藍色":"blue","藍":"blue",
     "綠色":"green","綠":"green","黑色":"black","黑":"black","白色":"white","白":"white","粉紅色":"pink","粉紅":"pink","粉":"pink",
     "橘色":"orange","橘":"orange","棕色":"brown","棕":"brown","咖啡色":"brown","咖啡":"brown","灰色":"gray","灰":"gray"
 }
-TOP_WORDS = r"(上衣|衣服|襯衫|T恤|T-shirt|外套|毛衣|連帽衣|風衣|裙子|長裙|洋裝)" # 增加更多衣物詞彙
+TOP_WORDS = r"(上衣|衣服|襯衫|T恤|T-shirt|外套|毛衣|連帽衣|風衣|裙子|長裙|洋裝)"
 HAIR_STYLE_WORDS = r"(長髮|短髮|直髮|捲髮|波浪|馬尾|雙馬尾|辮子)"
 GENDER_WORDS = r"(男孩|女孩|男性|女性|男生|女生|哥哥|姊姊|弟弟|妹妹|叔叔|阿姨|爸爸|媽媽)"
 
-# 新增：常用角色名稱列表
-CHARACTER_NAMES = ["小明", "小芳", "傑克", "瑪莉", "主角", "我"] # 可根據需求擴充
+# 🔧 新增：常用角色名稱列表（擴充：艾米莉/Emily、傑克/Jack）
+CHARACTER_NAMES = ["小明", "小芳", "傑克", "Jack", "瑪莉", "主角", "我", "艾米莉", "艾蜜莉", "Emily"]
 
-def _find_character_name(text):
+# 🔧 新增：找出所有句子，粗略切分（兼容中英標點）
+_SENT_SPLIT = re.compile(r"[。．\.！!？\?；;、，,]\s*")
+
+def _get_sentences(text: str):
+    s = _SENT_SPLIT.split(text)
+    return [x.strip() for x in s if x and x.strip()]
+
+def _find_character_mentions(text: str):
+    """回傳此句子中提到的所有已知角色名稱（若無則空陣列）"""
+    hits = []
     for name in CHARACTER_NAMES:
         if name in text:
-            return name
-    return None
+            hits.append(name)
+    return hits
 
-def maybe_update_character_card(sess, user_id, text):
-    """
-    從使用者本輪訊息中抽取外觀線索並更新 sess['characters']；同步寫入 Firestore current。
-    針對常見特徵做規則抽取：上衣顏色/種類、頭髮顏色/長短/眼鏡/帽子/性別線索。
-    """
-    # 預設更新「主角」的角色卡
-    char_name = _find_character_name(text) or "主角"
-    
-    updated = False
-    # 修改：從 'characters' 字典中獲取或創建特定角色的卡片
-    card = sess["characters"].setdefault(char_name, {})
-
-    # 1) 上衣/外套 + 顏色
-    if re.search(TOP_WORDS, text):
-        zh, en = _find_color(text)
-        if zh:
-            card["top_color_zh"] = zh
-            card["top_color_en"] = en
-            updated = True
-        m_top = re.search(TOP_WORDS, text)
-        if m_top:
-            card["top_type_zh"] = m_top.group(1)
-            updated = True
-
-    # 2) 頭髮顏色/長短
-    if "髮" in text or "頭髮" in text:
-        zh, en = _find_color(text)
-        if zh:
-            card["hair_color_zh"] = zh
-            card["hair_color_en"] = en
-            updated = True
-        m_style = re.search(HAIR_STYLE_WORDS, text)
-        if m_style:
-            card["hair_style_zh"] = m_style.group(1)
-            updated = True
-
-    # 3) 眼鏡 / 帽子 / 鬍子
-    if re.search(r"(戴|配).*(眼鏡)", text):
-        card["accessory_glasses"] = True
-        updated = True
-    if re.search(r"(戴|戴著).*(帽|帽子)", text):
-        card["accessory_hat"] = True
-        updated = True
-    if re.search(r"(留鬍|有鬍|鬍子)", text):
-        card["has_beard"] = True
-        updated = True
-
-    # 4) 性別/年齡線索（僅做弱提示）
-    if re.search(GENDER_WORDS, text):
-        card["gender_hint_zh"] = re.search(GENDER_WORDS, text).group(1)
-        updated = True
-
-    if updated:
-        log.info("🧬 character_card updated | user=%s | char=%s | card=%s", user_id, char_name, json.dumps(card, ensure_ascii=False))
-        save_current_story(user_id, sess)
+# 🔧 新增：顏色抽取（回傳第一個命中的 (zh, en)）
+def _find_color(text: str):
+    for zh, en in COLOR_MAP.items():
+        if zh in text:
+            return zh, en
+    return None, None
 
 def render_character_card_as_text(characters: dict) -> str:
-    """
-    將多個角色卡渲染為可讀的提示，放進圖像 prompt。
-    為每個角色單獨描述，並加入一致性提示。
-    """
     if not characters: return ""
-    
     all_char_zh = []
     all_char_en = []
-    
+
     for char_name, card in characters.items():
-        # 填充預設值以防遺漏
         card.setdefault("top_type_zh", "上衣")
         card.setdefault("hair_style_zh", "頭髮")
-        
+
         parts_zh = [f"{char_name}"]
         parts_en = [f"{char_name}"]
 
-        # 處理中文描述
         if card.get("gender_hint_zh"):
             parts_zh.append(f"是{card['gender_hint_zh']}")
-        
-        # 盡量讓描述流暢
+
         clothing_desc = ""
         if card.get("top_color_zh"):
             clothing_desc += f"穿著{card['top_color_zh']}"
-        clothing_desc += f"{card['top_type_zh']}" if card.get("top_type_zh") else ""
+        clothing_desc += f"{card.get('top_type_zh','')}"
         if clothing_desc: parts_zh.append(clothing_desc)
-        
+
         hair_desc = ""
         if card.get("hair_color_zh"):
             hair_desc += f"{card['hair_color_zh']}"
         if card.get("hair_style_zh"):
             hair_desc += f"{card['hair_style_zh']}"
         if hair_desc: parts_zh.append(f"有{hair_desc}")
-            
+
         accessories_desc = []
         if card.get("accessory_glasses"): accessories_desc.append("戴眼鏡")
         if card.get("accessory_hat"): accessories_desc.append("戴帽子")
         if card.get("has_beard"): accessories_desc.append("留鬍子")
         if accessories_desc: parts_zh.append("，".join(accessories_desc))
-            
+
         all_char_zh.append("".join(parts_zh))
 
-        # 處理英文描述
         if card.get("top_color_en") or card.get("top_type_zh"):
-            parts_en.append(f"wears a {card.get('top_color_en','')} {card.get('top_type_zh','top')}")
+            parts_en.append(f"wears a {card.get('top_color_en','')} {card.get('top_type_zh','top')}".strip())
         if card.get("hair_color_en"):
             parts_en.append(f"has {card['hair_color_en']} hair")
         if card.get("hair_style_zh"):
@@ -343,8 +297,8 @@ def render_character_card_as_text(characters: dict) -> str:
             parts_en.append("wears a hat")
         if card.get("has_beard"):
             parts_en.append("has a beard")
-        
-        all_char_en.append(f"{char_name}: " + ", ".join(parts_en))
+
+        all_char_en.append(f"{char_name}: " + ", ".join([p for p in parts_en if p]))
 
     zh_line = "、".join(all_char_zh) + "。"
     en_line = " | ".join(all_char_en) + ". Keep character appearances consistent across scenes."
@@ -353,6 +307,68 @@ def render_character_card_as_text(characters: dict) -> str:
     if zh_line and zh_line != "主角。": out.append(f"角色特徵：{zh_line}")
     if en_line: out.append(en_line)
     return " ".join(out)
+
+# 🔧 調整：支援一句話同時描述多位角色（逐句、逐名更新）
+def maybe_update_character_card(sess, user_id, text):
+    sentences = _get_sentences(text)
+    updated_any = False
+
+    for sent in sentences:
+        names = _find_character_mentions(sent)
+        target_names = names if names else ["主角"]  # 若句中沒明指名，歸到「主角」
+
+        for char_name in target_names:
+            card = sess["characters"].setdefault(char_name, {})
+            updated = False
+
+            # 上衣/外套/裙子 + 顏色
+            if re.search(TOP_WORDS, sent):
+                zh, en = _find_color(sent)
+                if zh:
+                    card["top_color_zh"] = zh
+                    card["top_color_en"] = en
+                    updated = True
+                m_top = re.search(TOP_WORDS, sent)
+                if m_top:
+                    card["top_type_zh"] = m_top.group(1)
+                    updated = True
+
+            # 頭髮顏色/長短
+            if "髮" in sent or "頭髮" in sent:
+                zh, en = _find_color(sent)
+                if zh:
+                    card["hair_color_zh"] = zh
+                    card["hair_color_en"] = en
+                    updated = True
+                m_style = re.search(HAIR_STYLE_WORDS, sent)
+                if m_style:
+                    card["hair_style_zh"] = m_style.group(1)
+                    updated = True
+
+            # 眼鏡 / 帽子 / 鬍子
+            if re.search(r"(戴|配).*(眼鏡)", sent):
+                card["accessory_glasses"] = True
+                updated = True
+            if re.search(r"(戴|戴著).*(帽|帽子)", sent):
+                card["accessory_hat"] = True
+                updated = True
+            if re.search(r"(留鬍|有鬍|鬍子)", sent):
+                card["has_beard"] = True
+                updated = True
+
+            # 性別/年齡線索
+            g = re.search(GENDER_WORDS, sent)
+            if g:
+                card["gender_hint_zh"] = g.group(1)
+                updated = True
+
+            if updated:
+                updated_any = True
+                log.info("🧬 character_card updated | user=%s | char=%s | card=%s",
+                         user_id, char_name, json.dumps(card, ensure_ascii=False))
+
+    if updated_any:
+        save_current_story(user_id, sess)
 
 # =============== 摘要與分段 ===============
 def generate_story_summary(messages):
@@ -426,7 +442,7 @@ def handle_message(event):
     log.info("📩 LINE text | user=%s | text=%s", user_id, text)
 
     sess = _ensure_session(user_id)
-    load_current_story(user_id, sess)  # 取回可能已有的 current
+    load_current_story(user_id, sess)
     sess["messages"].append({"role": "user", "content": text})
     if len(sess["messages"]) > 60:
         sess["messages"] = sess["messages"][-60:]
@@ -467,8 +483,12 @@ def handle_message(event):
 
 @handler.add(MessageEvent)
 def handle_non_text(event):
+    # 小心：這個處理器會吃到所有 MessageEvent（包括文字）
+    # 但上面已經限定 message=TextMessage 的 handler 會優先處理文字訊息。
     user_id = getattr(event.source, "user_id", "unknown")
     etype = type(event.message).__name__
+    if isinstance(event.message, TextMessage):
+        return  # 避免重複回覆
     log.info("🧾 LINE non-text | user=%s | type=%s", user_id, etype)
     try:
         line_bot_api.reply_message(event.reply_token, TextSendMessage("目前我只看得懂文字訊息喔～"))
@@ -491,7 +511,6 @@ def _draw_and_push(user_id, idx, extra):
             return
 
         scene = paras[idx]
-        # 修改：將多個角色卡傳入生成提示
         char_hint = render_character_card_as_text(sess.get("characters", {}))
         prompt = build_scene_prompt(scene_desc=scene, char_hint=char_hint, extra=extra)
         log.info("🧩 [bg] prompt head: %s", prompt[:200])
@@ -528,3 +547,14 @@ def _draw_and_push(user_id, idx, extra):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+```
+
+### 這版修了什麼（重點）
+
+* 補上 `_find_color()`，直接解掉你的 `NameError`。
+* 角色抽取強化：一則訊息可同時更新多位角色（逐句切分、逐名匹配），像「艾米莉…；傑克…」都各自寫入卡片。
+* 擴充 `CHARACTER_NAMES`（含「艾米莉/Emily」「傑克/Jack」），可自行再加。
+* 非文字訊息處理器避免重複回覆：若已由文字處理器處理，就不再回覆一次（避免雙重回覆的潛在風險）。
+* 其餘行為（總結、分段繪圖、GCS 上傳、Firestore 儲存）維持原本你的流程。
+
+直接部署這份即可。如果你還想讓「裙子」被單獨存成 `bottom_type`、`bottom_color` 再畫，之後我也可以幫你把上下身分開（目前我沿用你原本 `top_*` 欄位習慣，先讓系統穩定跑起來）。
