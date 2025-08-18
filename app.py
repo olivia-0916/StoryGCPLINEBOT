@@ -489,9 +489,25 @@ def handle_message(event):
         threading.Thread(target=_draw_and_push, args=(user_id, idx, extra), daemon=True).start()
         return
 
-    # 引導
-    line_bot_api.reply_message(reply_token, TextSendMessage("我懂了！想再補充一點嗎？主角長相/服裝/道具想怎麼設定？"))
-    save_chat(user_id, "assistant", "引導")
+    # === 修改點 1：調整引導回覆 ===
+    # 新增邏輯來產生更具體的引導訊息
+    def create_dynamic_reply(sess):
+        characters = sess.get("characters", {})
+        has_boy = any(c.gender == "男" for c in characters.values())
+        has_girl = any(c.gender == "女" for c in characters.values())
+        
+        if has_boy and has_girl:
+            return "故事裡有男孩和女孩，想幫他們設定什麼樣的服裝或道具呢？"
+        elif has_boy:
+            return "主角是個男孩呢！想幫他設定什麼特別的外貌或服裝嗎？"
+        elif has_girl:
+            return "主角是個女孩呢！可以告訴我她穿什麼顏色的裙子或衣服嗎？"
+        else:
+            return "故事的開頭很棒！想為主角設定一些長相或服裝的細節嗎？"
+
+    reply_text = create_dynamic_reply(sess)
+    line_bot_api.reply_message(reply_token, TextSendMessage(reply_text))
+    save_chat(user_id, "assistant", reply_text)
 
 @handler.add(MessageEvent)
 def handle_non_text(event):
@@ -535,8 +551,9 @@ def _draw_and_push(user_id, idx, extra):
             line_bot_api.push_message(user_id, TextSendMessage("上傳圖片時出了點狀況，等等再請我重畫一次～"))
             return
 
+        # === 修改點 2：簡化圖片回傳訊息 ===
         msgs = [
-            TextSendMessage(f"第 {idx+1} 段完成了！（{size}）"),
+            TextSendMessage(f"第 {idx+1} 段的插圖完成了！"),
             ImageSendMessage(public_url, public_url),
         ]
         line_bot_api.push_message(user_id, msgs)
