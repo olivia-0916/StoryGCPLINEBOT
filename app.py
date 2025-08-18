@@ -488,14 +488,21 @@ def handle_message(event):
     maybe_update_character_card(sess, user_id, text)
 
     # 5. 處理總結故事
+    # 修正邏輯：只有當使用者明確發出指令時，才進行故事總結
     if re.search(r"(整理|總結|summary)", text):
-        compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
-        summary = generate_story_summary(compact) or "1.\n2.\n3.\n4.\n5."
-        paras = extract_paragraphs(summary)
-        sess["paras"] = paras
-        save_current_story(user_id, sess)
-        line_bot_api.reply_message(reply_token, TextSendMessage("✨ 小繪把故事整理好了：\n" + summary))
-        save_chat(user_id, "assistant", summary)
+        # 避免在故事總結前又自動加了引導回覆
+        if len(sess["paras"]) > 0:
+            summary = "\n".join(sess["paras"])
+            line_bot_api.reply_message(reply_token, TextSendMessage("✨ 小繪把故事整理好了：\n" + summary))
+            save_chat(user_id, "assistant", summary)
+        else:
+            compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
+            summary = generate_story_summary(compact) or "1.\n2.\n3.\n4.\n5."
+            paras = extract_paragraphs(summary)
+            sess["paras"] = paras
+            save_current_story(user_id, sess)
+            line_bot_api.reply_message(reply_token, TextSendMessage("✨ 小繪把故事整理好了：\n" + summary))
+            save_chat(user_id, "assistant", summary)
         return
 
     # 處理畫圖請求
