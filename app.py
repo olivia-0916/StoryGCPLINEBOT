@@ -488,9 +488,8 @@ def handle_message(event):
     maybe_update_character_card(sess, user_id, text)
 
     # 5. 處理總結故事
-    # 修正邏輯：只有當使用者明確發出指令時，才進行故事總結
+    # 修正邏輯：將總結判斷優先級拉到最前面
     if re.search(r"(整理|總結|summary)", text):
-        # 避免在故事總結前又自動加了引導回覆
         if len(sess["paras"]) > 0:
             summary = "\n".join(sess["paras"])
             line_bot_api.reply_message(reply_token, TextSendMessage("✨ 小繪把故事整理好了：\n" + summary))
@@ -517,6 +516,7 @@ def handle_message(event):
         return
 
     # 3. 處理動態引導回覆
+    # 修正邏輯：將此判斷放到最後
     def generate_story_prompt(sess):
         characters = sess.get("characters", {})
         has_boy = any(c.gender == "男" for c in characters.values())
