@@ -20,10 +20,10 @@ sys.stdout.reconfigure(encoding="utf-8")
 # =============== 基礎設定 =============== 
 app = Flask(__name__) 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") 
-LINE_CHANNEL_SECRET       = os.environ.get("LINE_CHANNEL_SECRET") 
-OPENAI_API_KEY            = os.environ.get("OPENAI_API_KEY") 
-GCS_BUCKET                = os.environ.get("GCS_BUCKET", "storybotimage") 
-IMAGE_SIZE_ENV            = (os.environ.get("IMAGE_SIZE") or "1024x1024").strip() 
+LINE_CHANNEL_SECRET         = os.environ.get("LINE_CHANNEL_SECRET") 
+OPENAI_API_KEY          = os.environ.get("OPENAI_API_KEY") 
+GCS_BUCKET          = os.environ.get("GCS_BUCKET", "storybotimage") 
+IMAGE_SIZE_ENV          = (os.environ.get("IMAGE_SIZE") or "1024x1024").strip() 
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET: 
     log.error("LINE credentials missing.") 
@@ -77,7 +77,7 @@ def gcs_upload_bytes(data: bytes, filename: str, content_type: str = "image/png"
         blob.upload_from_string(data, content_type=content_type) 
         url = f"https://storage.googleapis.com/{gcs_bucket.name}/{filename}" 
         log.info("☁️ GCS upload ok | ms=%d | name=%s | bytes=%d | url=%s", 
-                 int((time.time()-t0)*1000), filename, len(data or b""), url) 
+                  int((time.time()-t0)*1000), filename, len(data or b""), url) 
         return url 
     except GoogleAPIError as e: 
         log.exception("❌ GCS API error: %s", e) 
@@ -159,7 +159,7 @@ def openai_images_generate(prompt: str, size: str):
             return None 
 
         log.info("🖼️ images.generate ok | ms=%d | bytes=%d", 
-                 int((time.time()-t0)*1000), len(img_bytes)) 
+                  int((time.time()-t0)*1000), len(img_bytes)) 
         return img_bytes 
     except Exception as e: 
         log.exception("💥 images.generate error: %s", e) 
@@ -476,7 +476,7 @@ def handle_message(event):
     if "一起來講故事吧" in text:
         user_sessions[user_id] = {"messages": [], "paras": [], "characters": {}, "story_id": None}
         _ensure_session(user_id) # 重新初始化 session
-        line_bot_api.reply_message(reply_token, TextSendMessage("太棒了！小繪已經準備好聽你說故事了。從頭開始發想一個新故事吧！"))
+        line_bot_api.reply_message(reply_token, TextSendMessage("太棒了！小繪已經準備好了。我們來創造一個全新的故事吧！故事的主角是誰呢？"))
         return
     
     # 將使用者訊息存入 session
@@ -533,6 +533,8 @@ def handle_message(event):
     elif re.search(r"(地點|地方|時|時間|那裡)", text):
         # 引導關於地點或時間的細節
         guiding_response = "哇，故事發生在一個特別的地方！那裡是什麼樣的景色呢？"
+    elif re.search(r"(一起來講故事|說故事)", text):
+        guiding_response = "太棒了！小繪已經準備好了。我們來創造一個全新的故事吧！故事的主角是誰呢？"
     else:
         # 隨機通用引導
         guiding_response = random.choice(GUIDING_RESPONSES)
