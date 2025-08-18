@@ -475,11 +475,11 @@ def handle_message(event):
         line_bot_api.reply_message(reply_token, TextSendMessage("嗨！我是小繪機器人，一個喜歡聽故事並將它畫成插圖的夥伴！很開心認識你！"))
         return
     
-    if "一起來講故事吧" in text:
+    if re.search(r"一起來講故事|我們來講個故事|開始說故事|說個故事|來點故事|我想寫故事", text):
         user_sessions[user_id] = {"messages": [], "paras": [], "characters": {}, "story_id": None}
         _ensure_session(user_id) # 重新初始化 session
         line_bot_api.reply_message(reply_token, TextSendMessage("太棒了！小繪已經準備好了。我們來創造一個全新的故事吧！故事的主角是誰呢？"))
-        return # <-- 這裡的 return 是關鍵，確保不會執行到後面的通用回覆
+        return
 
     # 將使用者訊息存入 session
     sess["messages"].append({"role": "user", "content": text}) 
