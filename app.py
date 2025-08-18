@@ -122,11 +122,11 @@ def openai_images_generate(prompt: str, size: str):
         img_bytes = None 
 
         if _openai_mode == "sdk1": 
+            # 修正：改回 gpt-image-1 模型
             resp = _oai_client.images.generate( 
-                model="dall-e-3", # 調整為 DALL-E 3 以獲得更好的圖像品質 
+                model="gpt-image-1", 
                 prompt=prompt, 
                 size=size, 
-                quality="hd", 
             ) 
             datum = resp.data[0] 
             b64 = getattr(datum, "b64_json", None) 
@@ -138,11 +138,11 @@ def openai_images_generate(prompt: str, size: str):
                 r.raise_for_status() 
                 img_bytes = r.content 
         else: 
+            # 修正：改回 gpt-image-1 模型
             resp = _oai_client.Image.create( 
-                model="dall-e-3", 
+                model="gpt-image-1", 
                 prompt=prompt, 
                 size=size, 
-                quality="hd", 
             ) 
             d0 = resp["data"][0] 
             b64 = d0.get("b64_json") 
@@ -165,7 +165,7 @@ def openai_images_generate(prompt: str, size: str):
         log.exception("💥 images.generate error: %s", e) 
         return None 
 
-# --- 新增：角色卡類別 --- 
+# --- 角色卡類別 --- 
 class CharacterCard: 
     def __init__(self, name_hint="主角"): 
         self.name = name_hint 
@@ -409,7 +409,7 @@ def extract_paragraphs(summary):
     return lines[:5] 
 
 # =============== 圖像 Prompt =============== 
-# 🎨 調整繪圖風格，從原本的水彩風改為更細緻、明亮的數位藝術風格 
+# 🎨 畫風回歸到最初的設定，避免風格跑掉 
 BASE_STYLE = ( 
     "a vibrant digital storybook illustration, clean bold lines, " 
     "a vivid color palette, and high detail. The scene should have " 
