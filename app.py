@@ -77,7 +77,7 @@ def gcs_upload_bytes(data: bytes, filename: str, content_type: str = "image/png"
         blob.upload_from_string(data, content_type=content_type) 
         url = f"https://storage.googleapis.com/{gcs_bucket.name}/{filename}" 
         log.info("☁️ GCS upload ok | ms=%d | name=%s | bytes=%d | url=%s", 
-                  int((time.time()-t0)*1000), filename, len(data or b""), url) 
+                 int((time.time()-t0)*1000), filename, len(data or b""), url) 
         return url 
     except GoogleAPIError as e: 
         log.exception("❌ GCS API error: %s", e) 
@@ -159,7 +159,7 @@ def openai_images_generate(prompt: str, size: str):
             return None 
 
         log.info("🖼️ images.generate ok | ms=%d | bytes=%d", 
-                  int((time.time()-t0)*1000), len(img_bytes)) 
+                 int((time.time()-t0)*1000), len(img_bytes)) 
         return img_bytes 
     except Exception as e: 
         log.exception("💥 images.generate error: %s", e) 
@@ -479,8 +479,8 @@ def handle_message(event):
         user_sessions[user_id] = {"messages": [], "paras": [], "characters": {}, "story_id": None}
         _ensure_session(user_id) # 重新初始化 session
         line_bot_api.reply_message(reply_token, TextSendMessage("太棒了！小繪已經準備好了。我們來創造一個全新的故事吧！故事的主角是誰呢？"))
-        return
-    
+        return # <-- 這裡的 return 是關鍵，確保不會執行到後面的通用回覆
+
     # 將使用者訊息存入 session
     sess["messages"].append({"role": "user", "content": text}) 
     if len(sess["messages"]) > 60: 
