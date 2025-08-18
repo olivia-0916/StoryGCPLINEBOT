@@ -20,10 +20,10 @@ sys.stdout.reconfigure(encoding="utf-8")
 # =============== 基礎設定 =============== 
 app = Flask(__name__) 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") 
-LINE_CHANNEL_SECRET         = os.environ.get("LINE_CHANNEL_SECRET") 
-OPENAI_API_KEY          = os.environ.get("OPENAI_API_KEY") 
-GCS_BUCKET          = os.environ.get("GCS_BUCKET", "storybotimage") 
-IMAGE_SIZE_ENV          = (os.environ.get("IMAGE_SIZE") or "1024x1024").strip() 
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET") 
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") 
+GCS_BUCKET = os.environ.get("GCS_BUCKET", "storybotimage") 
+IMAGE_SIZE_ENV = (os.environ.get("IMAGE_SIZE") or "1024x1024").strip() 
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET: 
     log.error("LINE credentials missing.") 
@@ -31,7 +31,7 @@ if not OPENAI_API_KEY:
     log.warning("OPENAI_API_KEY is empty; image generation will fail.") 
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN) 
-handler      = WebhookHandler(LINE_CHANNEL_SECRET) 
+handler = WebhookHandler(LINE_CHANNEL_SECRET) 
 log.info("🚀 app boot: public GCS URL mode (Uniform access + bucket public)") 
 
 # =============== Firebase / Firestore（容錯） =============== 
@@ -41,7 +41,7 @@ from google.cloud import storage as gcs_storage
 from google.api_core.exceptions import GoogleAPIError 
 
 FIREBASE_CREDENTIALS = os.environ.get("FIREBASE_CREDENTIALS") 
-FIREBASE_PROJECT_ID  = os.environ.get("FIREBASE_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT") 
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT") 
 
 def _init_firebase(): 
     try: 
@@ -226,11 +226,11 @@ class CharacterCard:
         return ", ".join(parts) 
 
 # =============== 會話記憶（含角色卡） =============== 
-user_sessions = {}  # {uid: {"messages": [...], "paras": [...], "characters": {...}, "story_id": "..."}} 
+user_sessions = {}  # {uid: {"messages": [...], "paras": [...], "characters": {...}, "story_id": "...", "last_guiding_response": None}}
 user_seeds    = {} 
 
 def _ensure_session(user_id): 
-    sess = user_sessions.setdefault(user_id, {"messages": [], "paras": [], "characters": {}, "story_id": None}) 
+    sess = user_sessions.setdefault(user_id, {"messages": [], "paras": [], "characters": {}, "story_id": None, "last_guiding_response": None})
     user_seeds.setdefault(user_id, random.randint(100000, 999999)) 
     if sess.get("story_id") is None: 
         sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}" 
@@ -456,6 +456,8 @@ GUIDING_RESPONSES = [
     "哇，這個情節好刺激！接下來主角會遇到什麼挑戰呢？",
     "關於故事中的那個「東西」（例如：道具、超能力），你有更多想法嗎？"
 ]
+# 新增一個變數來儲存上一個引導性回覆，避免重複
+last_guiding_response = {}
 
 @handler.add(MessageEvent, message=TextMessage) 
 def handle_message(event): 
@@ -536,8 +538,14 @@ def handle_message(event):
     elif re.search(r"(一起來講故事|說故事)", text):
         guiding_response = "太棒了！小繪已經準備好了。我們來創造一個全新的故事吧！故事的主角是誰呢？"
     else:
-        # 隨機通用引導
-        guiding_response = random.choice(GUIDING_RESPONSES)
+        # 隨機通用引導，但確保不與上一次重複
+        available_responses = [r for r in GUIDING_RESPONSES if r != last_guiding_response.get(user_id)]
+        if not available_responses:
+            available_responses = GUIDING_RESPONSES.copy()
+        guiding_response = random.choice(available_responses)
+
+    # 儲存本次的回覆，供下次檢查
+    last_guiding_response[user_id] = guiding_response
 
     line_bot_api.reply_message(reply_token, TextSendMessage(guiding_response)) 
     save_chat(user_id, "assistant", guiding_response) 
@@ -560,7 +568,7 @@ def _draw_and_push(user_id, idx, extra):
     try: 
         sess = _ensure_session(user_id) 
         load_current_story(user_id, sess) 
-        log.info("🎯 [bg] draw request | user=%s | idx=%d | extra=%s | story_id=%s", user_id, idx, extra, sess.get("story_id")) 
+        log.info("🎯 [bg] draw request | user=%s | idx=%d | extra=%s | story_id=%s", user_id, extra, sess.get("story_id")) 
 
         paras = _get_paragraphs_for_user(sess) 
         if not paras or idx >= len(paras): 
