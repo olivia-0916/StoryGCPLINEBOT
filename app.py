@@ -455,57 +455,81 @@ def handle_message(event):
     log.info("📩 LINE text | user=%s | text=%s", user_id, text)
 
     sess = _ensure_session(user_id)
-    load_current_story(user_id, sess)  # 取回可能已有的 current
+    load_current_story(user_id, sess)
+    
+    reply_token = event.reply_token
+    
+    # 1. 處理打招呼與自我介紹
+    if len(sess["messages"]) == 0 and re.search(r"^(hi|你好|嗨|哈囉|hello)", text.lower()):
+        reply_text = "嗨！我是專門和你一起創造故事的「小繪」！你想好要開始一個什麼樣的故事了嗎？"
+        line_bot_api.reply_message(reply_token, TextSendMessage(reply_text))
+        save_chat(user_id, "assistant", reply_text)
+        sess["messages"].append({"role": "user", "content": text})
+        save_chat(user_id, "user", text)
+        return
+        
     sess["messages"].append({"role": "user", "content": text})
     if len(sess["messages"]) > 60:
         sess["messages"] = sess["messages"][-60:]
     save_chat(user_id, "user", text)
 
+    # 2. 處理開新故事
+    if re.search(r"一起來講故事吧", text):
+        sess["messages"] = []
+        sess["paras"] = []
+        sess["characters"] = {"主角1": CharacterCard(name_hint="主角1"), "主角2": CharacterCard(name_hint="主角2")}
+        sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
+        save_current_story(user_id, sess)
+        reply_text = "太棒了！小繪已經準備好了。我們來創造一個全新的故事吧！故事的主角是誰呢？"
+        line_bot_api.reply_message(reply_token, TextSendMessage(reply_text))
+        save_chat(user_id, "assistant", reply_text)
+        return
+
     maybe_update_character_card(sess, user_id, text)
 
-    reply_token = event.reply_token
-
-    # 整理/總結 -> 建立新故事、重置角色卡
+    # 5. 處理總結故事
     if re.search(r"(整理|總結|summary)", text):
         compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
         summary = generate_story_summary(compact) or "1.\n2.\n3.\n4.\n5."
         paras = extract_paragraphs(summary)
         sess["paras"] = paras
-        sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
-        sess["characters"] = {"主角1": CharacterCard(name_hint="主角1"), "主角2": CharacterCard(name_hint="主角2")}
         save_current_story(user_id, sess)
-        line_bot_api.reply_message(reply_token, TextSendMessage("✨ 故事總結完成：\n" + summary))
+        line_bot_api.reply_message(reply_token, TextSendMessage("✨ 小繪把故事整理好了：\n" + summary))
         save_chat(user_id, "assistant", summary)
         return
 
-    # 畫第N段
+    # 處理畫圖請求
     m = re.search(r"(畫|請畫|幫我畫)第([一二三四五12345])段", text)
     if m:
         n_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
                  '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
         idx = n_map[m.group(2)] - 1
         extra = re.sub(r"(畫|請畫|幫我畫)第[一二三四五12345]段", "", text).strip(" ，,。.!！")
-        line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！第 {idx+1} 段開始生成，完成後會再傳給你～"))
+        line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！小繪開始畫第 {idx+1} 段囉，完成後會再傳給你！"))
         threading.Thread(target=_draw_and_push, args=(user_id, idx, extra), daemon=True).start()
         return
 
-    # === 修改點 1：調整引導回覆 ===
-    # 新增邏輯來產生更具體的引導訊息
-    def create_dynamic_reply(sess):
+    # 3. 處理動態引導回覆
+    def generate_story_prompt(sess):
         characters = sess.get("characters", {})
         has_boy = any(c.gender == "男" for c in characters.values())
         has_girl = any(c.gender == "女" for c in characters.values())
         
-        if has_boy and has_girl:
-            return "故事裡有男孩和女孩，想幫他們設定什麼樣的服裝或道具呢？"
-        elif has_boy:
-            return "主角是個男孩呢！想幫他設定什麼特別的外貌或服裝嗎？"
-        elif has_girl:
-            return "主角是個女孩呢！可以告訴我她穿什麼顏色的裙子或衣服嗎？"
-        else:
-            return "故事的開頭很棒！想為主角設定一些長相或服裝的細節嗎？"
+        last_user_msg = sess["messages"][-1]["content"] if sess["messages"] else ""
 
-    reply_text = create_dynamic_reply(sess)
+        if "超能力" in last_user_msg:
+            return "哇！超能力讓故事變得更酷了！這個超能力具體是怎麼使用的呢？"
+        
+        if has_boy and has_girl:
+            return "故事裡有男孩和女孩，想幫他們設定什麼樣的服裝或道具，讓他們更有特色呢？"
+        elif has_boy:
+            return "主角是個小男孩呢！小繪覺得他的故事很有趣！你還想補充他有哪些特別的喜好或小道具嗎？"
+        elif has_girl:
+            return "主角是個小女孩呢！小繪迫不及待想知道更多了！她喜歡穿什麼樣的衣服呢？"
+        else:
+            return "太棒了！故事的開頭很吸引人！你還想為故事增添哪些特別的元素或角色呢？"
+    
+    reply_text = generate_story_prompt(sess)
     line_bot_api.reply_message(reply_token, TextSendMessage(reply_text))
     save_chat(user_id, "assistant", reply_text)
 
@@ -515,7 +539,7 @@ def handle_non_text(event):
     etype = type(event.message).__name__
     log.info("🧾 LINE non-text | user=%s | type=%s", user_id, etype)
     try:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage("目前我只看得懂文字訊息喔～"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage("目前小繪只看得懂文字訊息喔～"))
     except Exception:
         pass
 
@@ -542,16 +566,16 @@ def _draw_and_push(user_id, idx, extra):
         size = _normalize_size(IMAGE_SIZE_ENV)
         img_bytes = openai_images_generate(prompt, size=size)
         if not img_bytes:
-            line_bot_api.push_message(user_id, TextSendMessage("圖片生成暫時失敗了，稍後再試一次可以嗎？"))
+            line_bot_api.push_message(user_id, TextSendMessage("圖片生成暫時失敗了，小繪等等再試一次可以嗎？"))
             return
 
         fname = f"line_images/{user_id}-{uuid.uuid4().hex[:6]}_s{idx+1}.png"
         public_url = gcs_upload_bytes(img_bytes, fname, "image/png")
         if not public_url:
-            line_bot_api.push_message(user_id, TextSendMessage("上傳圖片時出了點狀況，等等再請我重畫一次～"))
+            line_bot_api.push_message(user_id, TextSendMessage("上傳圖片時出了點狀況，等等再請小繪重畫一次～"))
             return
 
-        # === 修改點 2：簡化圖片回傳訊息 ===
+        # 圖片回傳與下一段提示
         msgs = [
             TextSendMessage(f"第 {idx+1} 段的插圖完成了！"),
             ImageSendMessage(public_url, public_url),
@@ -560,6 +584,18 @@ def _draw_and_push(user_id, idx, extra):
         log.info("✅ [bg] push image sent | user=%s | url=%s", user_id, public_url)
 
         save_chat(user_id, "assistant", f"[image]{public_url}")
+
+        # 6. 提示下一段故事
+        next_idx = idx + 1
+        if next_idx < len(paras):
+            next_scene = paras[next_idx]
+            tip_msg = f"要不要繼續畫第{next_idx + 1}段內容？下一段的內容是：\n「{next_scene}」"
+            line_bot_api.push_message(user_id, TextSendMessage(tip_msg))
+            save_chat(user_id, "assistant", tip_msg)
+        else:
+            final_msg = "太棒了！故事結束了！如果你想開始一個新的故事，隨時跟我說喔！"
+            line_bot_api.push_message(user_id, TextSendMessage(final_msg))
+            save_chat(user_id, "assistant", final_msg)
 
     except Exception as e:
         log.exception("💥 [bg] draw fail: %s", e)
