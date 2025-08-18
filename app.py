@@ -122,7 +122,6 @@ def openai_images_generate(prompt: str, size: str):
         img_bytes = None
 
         if _openai_mode == "sdk1":
-            # 修正：改回 gpt-image-1 模型
             resp = _oai_client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
@@ -138,7 +137,6 @@ def openai_images_generate(prompt: str, size: str):
                 r.raise_for_status()
                 img_bytes = r.content
         else:
-            # 修正：改回 gpt-image-1 模型
             resp = _oai_client.Image.create(
                 model="gpt-image-1",
                 prompt=prompt,
@@ -470,19 +468,18 @@ def generate_guiding_response(messages):
     使用 AI 模型生成更貼合情境的引導性回覆。
     """
     sysmsg = (
-        "你是一位充滿熱情、富有想像力的說故事夥伴。你的語氣要像一位溫暖的朋友，鼓勵對方分享更多故事細節。\n"
-        "請根據使用者剛剛說的內容，提出一個充滿好奇心、能激發他們想像力的開放式問題，讓故事自然地向前推進。\n"
-        "你的問題應該引導使用者去描述角色的感受、故事的新發展、一個有趣的細節或一個新出現的物品。\n"
-        "你的回覆必須是**簡短、親切、單一**的問題，不要有額外的解釋或說明。\n"
+        "你是一位充滿熱情、富有想像力的說故事夥伴，你的語氣要像一位活力四射的啦啦隊，給予使用者最直接的鼓勵與讚美。\n"
+        "你的任務是結合「讚美」和「引導」，讓使用者感到被肯定，並更有動力繼續說故事。\n"
+        "回覆格式必須為：`[讚美語句]！[表情符號] [開放式問題]`\n"
         "範例回覆：\n"
-        "『哇！聽起來好酷喔！那接下來發生了什麼事呀？』\n"
-        "『他現在的心情怎麼樣呢？好想知道！』\n"
-        "『這個情節太有趣了！接下來要遇到什麼樣的挑戰呢？』\n"
-        "『那他們是怎麼找到寶藏的呀？』"
+        "『你真的很有創意！🌟 那接下來發生了什麼事呀？』\n"
+        "『這個想法很不錯！👏 他現在的心情怎麼樣呢？』\n"
+        "『繼續加油，你做得很棒！💪 那他們是怎麼找到寶藏的呀？』\n"
+        "『哇，這個情節太有趣了！接下來要遇到什麼樣的挑戰呢？』"
     )
     # 取最近幾條對話歷史，作為模型的上下文
     context_msgs = [{"role": "system", "content": sysmsg}] + messages[-6:]
-
+    
     try:
         if _openai_mode == "sdk1":
             resp = _oai_client.chat.completions.create(
