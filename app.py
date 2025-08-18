@@ -470,7 +470,7 @@ def handle_message(event):
     
     reply_token = event.reply_token 
 
-    # 1. 處理特殊指令和打招呼
+    # 1. 處理特殊指令和打招呼，將「一起來講故事吧」放在最前面
     if re.search(r"(hi|Hi|你好|您好|哈囉)", text, re.IGNORECASE):
         line_bot_api.reply_message(reply_token, TextSendMessage("嗨！我是小繪機器人，一個喜歡聽故事並將它畫成插圖的夥伴！很開心認識你！"))
         return
@@ -535,8 +535,6 @@ def handle_message(event):
     elif re.search(r"(地點|地方|時|時間|那裡)", text):
         # 引導關於地點或時間的細節
         guiding_response = "哇，故事發生在一個特別的地方！那裡是什麼樣的景色呢？"
-    elif re.search(r"(一起來講故事|說故事)", text):
-        guiding_response = "太棒了！小繪已經準備好了。我們來創造一個全新的故事吧！故事的主角是誰呢？"
     else:
         # 隨機通用引導，但確保不與上一次重複
         available_responses = [r for r in GUIDING_RESPONSES if r != last_guiding_response.get(user_id)]
@@ -568,7 +566,7 @@ def _draw_and_push(user_id, idx, extra):
     try: 
         sess = _ensure_session(user_id) 
         load_current_story(user_id, sess) 
-        log.info("🎯 [bg] draw request | user=%s | idx=%d | extra=%s | story_id=%s", user_id, extra, sess.get("story_id")) 
+        log.info("🎯 [bg] draw request | user=%s | idx=%d | extra=%s | story_id=%s", user_id, idx, extra, sess.get("story_id")) 
 
         paras = _get_paragraphs_for_user(sess) 
         if not paras or idx >= len(paras): 
