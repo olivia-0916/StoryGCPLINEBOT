@@ -21,7 +21,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET       = os.environ.get("LINE_CHANNEL_SECRET")
-OPENAI_API_KEY            = os.environ.get("OPENAI_API_KEY")
+OPENAI_API_KEY          = os.environ.get("OPENAI_API_KEY")
 GCS_BUCKET                = os.environ.get("GCS_BUCKET", "storybotimage")
 IMAGE_SIZE_ENV            = (os.environ.get("IMAGE_SIZE") or "1024x1024").strip()
 
@@ -123,7 +123,7 @@ def openai_images_generate(prompt: str, size: str):
 
         if _openai_mode == "sdk1":
             resp = _oai_client.images.generate(
-                model="gpt-image-1",
+                model="dall-e-3",
                 prompt=prompt,
                 size=size,
             )
@@ -138,7 +138,7 @@ def openai_images_generate(prompt: str, size: str):
                 img_bytes = r.content
         else:
             resp = _oai_client.Image.create(
-                model="gpt-image-1",
+                model="dall-e-3",
                 prompt=prompt,
                 size=size,
             )
@@ -448,6 +448,43 @@ def callback():
     return "OK"
 
 # =============== LINE 主流程 ===============
+def _generate_next_prompt_by_llm(messages):
+    """
+    使用 LLM 根據故事上下文生成更精準的引導語句。
+    """
+    sysmsg = (
+        "你是一個說故事的小精靈。請閱讀以下故事對話，並生成一個提問來引導使用者繼續發揮。"
+        "你的提問必須緊密圍繞故事內容，並且盡可能引導使用者補充故事中的「人、事、時、地、物」等元素。"
+        "請不要重複使用者已經提及的內容，而是提出一個新的方向。例如，如果故事提到了人物，你可以問他們去了哪裡；"
+        "如果提到了物品，你可以問這個物品有什麼用處。你的回答必須是單一的提問，不需要任何額外的說明，"
+        "也不需要以「小繪說：」等開頭。盡量讓問題有趣且有想像力。"
+    )
+    
+    # 取最新的幾則對話
+    recent_messages = messages[-8:]
+    msgs = [{"role": "system", "content": sysmsg}] + recent_messages
+    
+    try:
+        if _openai_mode == "sdk1":
+            resp = _oai_client.chat.completions.create(
+                model="gpt-4o-mini", messages=msgs, temperature=0.8, max_tokens=100
+            )
+            return resp.choices[0].message.content.strip()
+        else:
+            resp = _oai_client.ChatCompletion.create(
+                model="gpt-4o-mini", messages=msgs, temperature=0.8, max_tokens=100
+            )
+            return resp["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        log.error("❌ OpenAI chat error in generating next prompt: %s", e)
+        # 降級方案
+        return random.choice([
+            "太棒了！故事越來越有趣了，接下來發生了什麼事呢？",
+            "故事的開頭很吸引人！你還想為故事增添哪些特別的元素或角色呢？",
+            "這個故事發生在什麼樣的環境呢？是在森林裡，還是熱鬧的城市呢？",
+            "故事的主角們接下來會遇到什麼樣的挑戰呢？"
+        ])
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -512,26 +549,7 @@ def handle_message(event):
     maybe_update_character_card(sess, user_id, text)
     
     # 7. 處理動態引導回覆 (放在最後，作為預設回覆)
-    def generate_story_prompt(sess):
-        characters = sess.get("characters", {})
-        has_boy = any(c.gender == "男" for c in characters.values())
-        has_girl = any(c.gender == "女" for c in characters.values())
-        
-        last_user_msg = sess["messages"][-1]["content"] if sess["messages"] else ""
-
-        if "超能力" in last_user_msg:
-            return "哇！超能力讓故事變得更酷了！這個超能力具體是怎麼使用的呢？"
-        
-        if has_boy and has_girl:
-            return "故事裡有男孩和女孩，想幫他們設定什麼樣的服裝或道具，讓他們更有特色呢？"
-        elif has_boy:
-            return "主角是個小男孩呢！小繪覺得他的故事很有趣！你還想補充他有哪些特別的喜好或小道具嗎？"
-        elif has_girl:
-            return "主角是個小女孩呢！小繪迫不及待想知道更多了！她喜歡穿什麼樣的衣服呢？"
-        else:
-            return "太棒了！故事的開頭很吸引人！你還想為故事增添哪些特別的元素或角色呢？"
-    
-    reply_text = generate_story_prompt(sess)
+    reply_text = _generate_next_prompt_by_llm(sess["messages"])
     line_bot_api.reply_message(reply_token, TextSendMessage(reply_text))
     save_chat(user_id, "assistant", reply_text)
 
@@ -610,4 +628,4 @@ def _draw_and_push(user_id, idx, extra):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-    
+
