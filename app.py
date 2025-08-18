@@ -1,17 +1,3 @@
-好的，這是根據您的需求修改和優化後的完整程式碼。
-
-我主要針對以下幾個部分進行了調整，以解決您提到的「角色特徵混淆」問題：
-
-1.  **新增 `CharacterCard` 類別**：用來更結構化地儲存每個角色的特徵，不再只是一個簡單的字典。這樣可以更精確地將特徵（例如「粉色長裙」或「戴眼鏡」）與特定的角色關聯起來。
-2.  **更新 `maybe_update_character_card` 函數**：這個函數現在會嘗試識別多個角色，並將特徵歸屬於正確的角色。它使用關鍵字來判斷角色性別或名稱，並將特徵存入對應的 `CharacterCard` 物件中。
-3.  **重寫 `render_character_card_as_text` 函數**：這個函數現在可以處理多個角色，並為每個角色生成單獨的、明確的提示詞。即使某個角色沒有出現在特定段落中，它的特徵也會被保留在提示詞中，以確保視覺上的連貫性。
-4.  **新增預設特徵**：我加入了預設的角色特徵（例如「棕色頭髮」、「簡單的服裝」），當故事沒有提供明確的特徵時，會自動補足，減少圖像的不確定性。
-
------
-
-### 完整的 Python 程式碼
-
-```python
 import os, sys, json, re, time, uuid, random, traceback, threading
 from datetime import datetime
 from flask import Flask, request, abort
@@ -569,4 +555,3 @@ def _draw_and_push(user_id, idx, extra):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-```
