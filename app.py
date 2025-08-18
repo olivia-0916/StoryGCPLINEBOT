@@ -458,22 +458,8 @@ def handle_message(event):
     load_current_story(user_id, sess)
     
     reply_token = event.reply_token
-    
-    # 1. 處理打招呼與自我介紹
-    if len(sess["messages"]) == 0 and re.search(r"^(hi|你好|嗨|哈囉|hello)", text.lower()):
-        reply_text = "嗨！我是專門和你一起創造故事的「小繪」！你想好要開始一個什麼樣的故事了嗎？"
-        line_bot_api.reply_message(reply_token, TextSendMessage(reply_text))
-        save_chat(user_id, "assistant", reply_text)
-        sess["messages"].append({"role": "user", "content": text})
-        save_chat(user_id, "user", text)
-        return
-        
-    sess["messages"].append({"role": "user", "content": text})
-    if len(sess["messages"]) > 60:
-        sess["messages"] = sess["messages"][-60:]
-    save_chat(user_id, "user", text)
 
-    # 2. 處理開新故事
+    # 1. 處理開新故事 (最高優先)
     if re.search(r"一起來講故事吧", text):
         sess["messages"] = []
         sess["paras"] = []
@@ -484,10 +470,23 @@ def handle_message(event):
         line_bot_api.reply_message(reply_token, TextSendMessage(reply_text))
         save_chat(user_id, "assistant", reply_text)
         return
-
-    maybe_update_character_card(sess, user_id, text)
+        
+    # 2. 處理打招呼與自我介紹 (第一則訊息專用)
+    if len(sess["messages"]) == 0 and re.search(r"^(hi|你好|嗨|哈囉|hello)", text.lower()):
+        reply_text = "嗨！我是專門和你一起創造故事的「小繪」！你想好要開始一個什麼樣的故事了嗎？"
+        line_bot_api.reply_message(reply_token, TextSendMessage(reply_text))
+        save_chat(user_id, "assistant", reply_text)
+        sess["messages"].append({"role": "user", "content": text})
+        save_chat(user_id, "user", text)
+        return
     
-    # 3. 處理畫圖請求
+    # 3. 儲存使用者對話
+    sess["messages"].append({"role": "user", "content": text})
+    if len(sess["messages"]) > 60:
+        sess["messages"] = sess["messages"][-60:]
+    save_chat(user_id, "user", text)
+
+    # 4. 處理明確指令: 畫圖
     m = re.search(r"(畫|請畫|幫我畫)第([一二三四五12345])段", text)
     if m:
         n_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
@@ -498,25 +497,21 @@ def handle_message(event):
         threading.Thread(target=_draw_and_push, args=(user_id, idx, extra), daemon=True).start()
         return
 
-    # 4. 處理總結故事
-    if re.search(r"(整理|總結|summary)", text):
-        # 避免在故事總結前又自動加了引導回覆
-        if len(sess["paras"]) > 0:
-            summary = "\n".join(sess["paras"])
-            line_bot_api.reply_message(reply_token, TextSendMessage("✨ 小繪把故事整理好了：\n" + summary))
-            save_chat(user_id, "assistant", summary)
-        else:
-            compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
-            summary = generate_story_summary(compact) or "1.\n2.\n3.\n4.\n5."
-            paras = extract_paragraphs(summary)
-            sess["paras"] = paras
-            save_current_story(user_id, sess)
-            line_bot_api.reply_message(reply_token, TextSendMessage("✨ 小繪把故事整理好了：\n" + summary))
-            save_chat(user_id, "assistant", summary)
+    # 5. 處理明確指令: 總結故事
+    if re.fullmatch(r"整理|總結|summary|整理目前的故事|總結目前的故事", text.lower()):
+        compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
+        summary = generate_story_summary(compact) or "1.\n2.\n3.\n4.\n5."
+        paras = extract_paragraphs(summary)
+        sess["paras"] = paras
+        save_current_story(user_id, sess)
+        line_bot_api.reply_message(reply_token, TextSendMessage("✨ 小繪把故事整理好了：\n" + summary))
+        save_chat(user_id, "assistant", summary)
         return
 
-    # 5. 處理動態引導回覆
-    # 修正邏輯：將此判斷放到最後
+    # 6. 更新角色卡片 (非明確指令，放在總結後)
+    maybe_update_character_card(sess, user_id, text)
+    
+    # 7. 處理動態引導回覆 (放在最後，作為預設回覆)
     def generate_story_prompt(sess):
         characters = sess.get("characters", {})
         has_boy = any(c.gender == "男" for c in characters.values())
@@ -615,3 +610,4 @@ def _draw_and_push(user_id, idx, extra):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+    
