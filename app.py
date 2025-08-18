@@ -1,6 +1,3 @@
-好的，我把你整支程式「直接修好」並補齊缺的 `_find_color()`，同時加強了角色卡抽取邏輯，支援一句話同時描述多位角色（例如「艾米莉…；傑克…」）也能各自更新。下面是可直接替換的完整 `app.py`（我只在註解標出「# 🔧 新增/調整」的地方動手，其餘保留你的結構與行為）。
-
-```python
 import os, sys, json, re, time, uuid, random, traceback, threading
 from datetime import datetime
 from flask import Flask, request, abort
@@ -547,14 +544,3 @@ def _draw_and_push(user_id, idx, extra):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-```
-
-### 這版修了什麼（重點）
-
-* 補上 `_find_color()`，直接解掉你的 `NameError`。
-* 角色抽取強化：一則訊息可同時更新多位角色（逐句切分、逐名匹配），像「艾米莉…；傑克…」都各自寫入卡片。
-* 擴充 `CHARACTER_NAMES`（含「艾米莉/Emily」「傑克/Jack」），可自行再加。
-* 非文字訊息處理器避免重複回覆：若已由文字處理器處理，就不再回覆一次（避免雙重回覆的潛在風險）。
-* 其餘行為（總結、分段繪圖、GCS 上傳、Firestore 儲存）維持原本你的流程。
-
-直接部署這份即可。如果你還想讓「裙子」被單獨存成 `bottom_type`、`bottom_color` 再畫，之後我也可以幫你把上下身分開（目前我沿用你原本 `top_*` 欄位習慣，先讓系統穩定跑起來）。
