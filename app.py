@@ -486,10 +486,21 @@ def handle_message(event):
         return
 
     maybe_update_character_card(sess, user_id, text)
+    
+    # 3. 處理畫圖請求
+    m = re.search(r"(畫|請畫|幫我畫)第([一二三四五12345])段", text)
+    if m:
+        n_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                 '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
+        idx = n_map[m.group(2)] - 1
+        extra = re.sub(r"(畫|請畫|幫我畫)第[一二三四五12345]段", "", text).strip(" ，,。.!！")
+        line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！小繪開始畫第 {idx+1} 段囉，完成後會再傳給你！"))
+        threading.Thread(target=_draw_and_push, args=(user_id, idx, extra), daemon=True).start()
+        return
 
-    # 5. 處理總結故事
-    # 修正邏輯：將總結判斷優先級拉到最前面
+    # 4. 處理總結故事
     if re.search(r"(整理|總結|summary)", text):
+        # 避免在故事總結前又自動加了引導回覆
         if len(sess["paras"]) > 0:
             summary = "\n".join(sess["paras"])
             line_bot_api.reply_message(reply_token, TextSendMessage("✨ 小繪把故事整理好了：\n" + summary))
@@ -504,18 +515,7 @@ def handle_message(event):
             save_chat(user_id, "assistant", summary)
         return
 
-    # 處理畫圖請求
-    m = re.search(r"(畫|請畫|幫我畫)第([一二三四五12345])段", text)
-    if m:
-        n_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
-                 '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
-        idx = n_map[m.group(2)] - 1
-        extra = re.sub(r"(畫|請畫|幫我畫)第[一二三四五12345]段", "", text).strip(" ，,。.!！")
-        line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！小繪開始畫第 {idx+1} 段囉，完成後會再傳給你！"))
-        threading.Thread(target=_draw_and_push, args=(user_id, idx, extra), daemon=True).start()
-        return
-
-    # 3. 處理動態引導回覆
+    # 5. 處理動態引導回覆
     # 修正邏輯：將此判斷放到最後
     def generate_story_prompt(sess):
         characters = sess.get("characters", {})
