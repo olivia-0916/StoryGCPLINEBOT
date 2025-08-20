@@ -361,6 +361,10 @@ def _extract_characters_from_text(text: str) -> list:
         log.info(f"✅ OpenAI API raw response (cleaned): {cleaned_json[:500]}")
         return json.loads(cleaned_json)
         
+    except json.decoder.JSONDecodeError as e:
+        log.error("❌ _extract_characters_from_text JSON decode error: %s", e)
+        log.error("❌ Raw content that caused error: %s", raw_response_content)
+        return []
     except Exception as e:
         log.error("❌ _extract_characters_from_text failed: %s", e)
         log.error("❌ Traceback: %s", traceback.format_exc())
@@ -377,11 +381,12 @@ def maybe_update_character_card(sess, user_id, text):
             gender = char_data.get("gender")
             features = char_data.get("features", {})
             
-            if not name:
+            target_card = None
+            if name:
+                target_card = sess["characters"].get(name)
+            elif species:
                 # 如果沒有名字，嘗試用物種來尋找
                 target_card = next((c for c in sess["characters"].values() if c.species == species), None)
-            else:
-                target_card = sess["characters"].get(name)
 
             if not target_card:
                 # 建立新角色卡
@@ -390,7 +395,7 @@ def maybe_update_character_card(sess, user_id, text):
                 new_card.species = species
                 new_card.gender = gender
                 new_card.features.update(features)
-                sess["characters"][new_card.name] = new_card
+                sess["characters"][new_card.name or new_card.name_hint] = new_card
                 updated = True
                 log.info("➕ created new character: %s", new_card.name)
             else:
@@ -584,15 +589,6 @@ def handle_message(event):
         paras = extract_paragraphs(summary)
         sess["paras"] = paras
         sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
-        # 重置角色卡，但保留性別與物種
-        old_chars = sess["characters"].copy()
-        sess["characters"] = {}
-        for name, char_card in old_chars.items():
-            new_card = CharacterCard(name_hint=name)
-            new_card.gender = char_card.gender
-            new_card.species = char_card.species
-            sess["characters"][name] = new_card
-        
         save_current_story(user_id, sess)
         line_bot_api.reply_message(reply_token, TextSendMessage("✨ 故事總結完成！這就是我們目前的故事：\n" + summary))
         save_chat(user_id, "assistant", summary)
