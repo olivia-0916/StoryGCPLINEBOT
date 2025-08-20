@@ -168,7 +168,7 @@ class CharacterCard:
     def __init__(self, name_hint="主角"):
         self.name = name_hint
         self.gender = None
-        self.species = None 
+        self.species = None
         self.features = {
             "top_color": None, "top_type": None,
             "bottom_color": None, "bottom_type": None,
@@ -183,7 +183,7 @@ class CharacterCard:
             self.features[key] = value
             return True
         return False
-        
+    
     def render_prompt(self):
         parts = []
         
@@ -338,6 +338,7 @@ def _extract_characters_from_text(text: str) -> list:
         "例如：\n"
         "[{\"name\": \"安琪\", \"species\": \"human\", \"gender\": \"female\", \"features\": {\"hair_color\": \"brown\", \"eye_color\": \"green\"}}, {\"name\": \"可可\", \"species\": \"fox\", \"gender\": null, \"features\": {\"color\": \"white\"}}]"
     )
+    raw_response_content = ""
     try:
         msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": text}]
         if _openai_mode == "sdk1":
@@ -359,8 +360,18 @@ def _extract_characters_from_text(text: str) -> list:
             return []
             
         log.info(f"✅ OpenAI API raw response (cleaned): {cleaned_json[:500]}")
-        return json.loads(cleaned_json)
         
+        parsed_data = json.loads(cleaned_json)
+        
+        # 修正邏輯：如果回傳的是單一物件，將其包裝成一個列表
+        if isinstance(parsed_data, dict):
+            return [parsed_data]
+        elif isinstance(parsed_data, list):
+            return parsed_data
+        else:
+            log.error("❌ _extract_characters_from_text: Unexpected JSON format.")
+            return []
+            
     except json.decoder.JSONDecodeError as e:
         log.error("❌ _extract_characters_from_text JSON decode error: %s", e)
         log.error("❌ Raw content that caused error: %s", raw_response_content)
