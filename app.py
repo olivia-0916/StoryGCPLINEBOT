@@ -195,7 +195,7 @@ class CharacterCard:
                 parts.append("a girl")
             else:
                 parts.append("a person")
-        elif self.species:
+        elif self.species and self.species != "unknown":
             parts.append(f"a {self.species}")
         else:
             parts.append("a person")
@@ -220,7 +220,7 @@ class CharacterCard:
             if self.features["hair_style"]:
                 hair_parts.append(self.features["hair_style"])
             if hair_parts:
-                parts.append(f"with {' '.join(hair_parts)}")
+                parts.append(f"with {' '.join(hair_parts)} hair")
             
             if self.features["eye_color"]:
                 parts.append(f"with {self.features['eye_color']} eyes")
@@ -278,6 +278,9 @@ def load_current_story(user_id, sess):
             loaded_chars = d.get("characters", {})
             for name, char_dict in loaded_chars.items():
                 card = CharacterCard(name_hint=name)
+                # 確保載入的 features 是一個字典
+                if 'features' in char_dict and char_dict['features'] is None:
+                    char_dict['features'] = {}
                 card.__dict__.update(char_dict)
                 sess["characters"][name] = card
     except Exception as e:
@@ -325,15 +328,15 @@ def _extract_characters_from_text(text: str) -> list:
         "你是一個角色資訊提取器。請分析使用者提供的故事文字，並找出其中的主角和關鍵角色。\n"
         "對於每個角色，請盡可能提取以下資訊：\n"
         "1. **`name`** (string): 如果有名字，請提取。若無，請用 null。\n"
-        "2. **`species`** (string): 判斷角色的物種，例如 'human', 'fox', 'deer' 等。若無法判斷，請用 'unknown'。\n"
+        "2. **`species`** (string): 判斷角色的物種，例如 'human', 'fox', 'deer', 'bird' 等。若無法判斷，請用 'unknown'。\n"
         "3. **`gender`** (string): 判斷性別，例如 'male', 'female'。若無法判斷，請用 null。\n"
-        "4. **`features`** (object): 找出角色的外觀特徵，例如 'hair_color', 'eye_color', 'top_color' 等。請使用英文描述。\n"
-        "   - 眼睛顏色：'eye_color': 'green'\n"
-        "   - 頭髮顏色：'hair_color': 'brown'\n"
-        "   - 頭髮樣式：'hair_style': 'straight hair'\n"
-        "   - 上衣顏色：'top_color': 'red'\n"
-        "   - 帽子：'accessory_hat': true\n"
-        "   - 若無該特徵，請不要在 features 中包含該鍵值。\n"
+        "4. **`features`** (object): 找出角色的外觀特徵，例如 'hair_color', 'eye_color', 'top_color' 等。請使用英文描述。若無任何特徵，請提供一個空物件 `{}`，**絕不**使用 null。\n"
+        "   - 眼睛顏色：'eye_color': 'green'\n"
+        "   - 頭髮顏色：'hair_color': 'brown'\n"
+        "   - 頭髮樣式：'hair_style': 'straight hair'\n"
+        "   - 上衣顏色：'top_color': 'red'\n"
+        "   - 帽子：'accessory_hat': true\n"
+        "   - 若無該特徵，請不要在 features 中包含該鍵值。\n"
         "**請以一個 JSON 陣列的形式輸出，不要有任何多餘的文字或解釋，只需 JSON 本身。**\n"
         "例如：\n"
         "[{\"name\": \"安琪\", \"species\": \"human\", \"gender\": \"female\", \"features\": {\"hair_color\": \"brown\", \"eye_color\": \"green\"}}, {\"name\": \"可可\", \"species\": \"fox\", \"gender\": null, \"features\": {\"color\": \"white\"}}]"
@@ -390,12 +393,13 @@ def maybe_update_character_card(sess, user_id, text):
             name = char_data.get("name")
             species = char_data.get("species")
             gender = char_data.get("gender")
-            features = char_data.get("features", {})
+            # 修正：確保 features 是一個字典，即使 AI 回應的是 null
+            features = char_data.get("features", {}) or {} 
             
             target_card = None
             if name:
                 target_card = sess["characters"].get(name)
-            elif species:
+            elif species and species != "unknown":
                 # 如果沒有名字，嘗試用物種來尋找
                 target_card = next((c for c in sess["characters"].values() if c.species == species), None)
 
@@ -405,10 +409,11 @@ def maybe_update_character_card(sess, user_id, text):
                 new_card.name = name
                 new_card.species = species
                 new_card.gender = gender
-                new_card.features.update(features)
+                if isinstance(features, dict):
+                    new_card.features.update(features)
                 sess["characters"][new_card.name or new_card.name_hint] = new_card
                 updated = True
-                log.info("➕ created new character: %s", new_card.name)
+                log.info("➕ created new character: %s", new_card.name or new_card.name_hint)
             else:
                 # 更新現有角色卡
                 if species and not target_card.species:
@@ -417,9 +422,10 @@ def maybe_update_character_card(sess, user_id, text):
                 if gender and not target_card.gender:
                     target_card.gender = gender
                     updated = True
-                for key, value in features.items():
-                    if target_card.update(key, value):
-                        updated = True
+                if isinstance(features, dict):
+                    for key, value in features.items():
+                        if target_card.update(key, value):
+                            updated = True
             
         if updated:
             log.info("🧬 character_cards updated | user=%s | cards=%s", user_id, json.dumps({k: v.__dict__ for k,v in sess["characters"].items()}, ensure_ascii=False))
@@ -443,9 +449,8 @@ def render_character_card_as_text(characters: dict) -> str:
     if not char_prompts:
         return ""
 
-    joined_prompts = " and ".join(char_prompts)
+    joined_prompts = "; ".join([f"The character {p}" for p in char_prompts])
     return f"{joined_prompts}. Keep character appearance consistent."
-
 
 # =============== 摘要與分段 ===============
 def generate_story_summary(messages):
@@ -494,7 +499,7 @@ BASE_STYLE = (
 
 def build_scene_prompt(scene_desc: str, char_hint: str = "", extra: str = ""):
     parts = [BASE_STYLE, f"Scene: {scene_desc}"]
-    if char_hint: parts.append(char_hint)
+    if char_hint: parts.insert(1, char_hint)
     if extra:    parts.append(extra)
     return " ".join(parts)
 
