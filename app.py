@@ -284,7 +284,42 @@ def load_current_story(user_id, sess):
         log.warning("⚠️ load_current_story failed: %s", e)
 
 
-# 新增：讓 AI 模型提取角色資訊
+# 新增一個輔助函式，專門用來清理 JSON 字串
+def _clean_json_string(text: str) -> str:
+    # 移除前後的換行、空格以及可能的 markdown 區塊
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.endswith("```"):
+        text = text[:-3]
+    # 移除前後的任何額外文字，只保留最外層的 [ ] 或 { } 區塊
+    start_index = text.find('[')
+    if start_index == -1:
+        start_index = text.find('{')
+    
+    if start_index != -1:
+        # 從第一個 [ 或 { 開始，找到對應的結尾 ] 或 }
+        brace_count = 0
+        in_string = False
+        end_index = -1
+        for i, char in enumerate(text[start_index:]):
+            if char == '"' and (i == 0 or text[start_index+i-1] != '\\'):
+                in_string = not in_string
+            if not in_string:
+                if char == '[' or char == '{':
+                    brace_count += 1
+                elif char == ']' or char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_index = start_index + i
+                        break
+        
+        if end_index != -1:
+            return text[start_index:end_index + 1]
+    
+    return ""
+
+# 修改 _extract_characters_from_text 函式
 def _extract_characters_from_text(text: str) -> list:
     sysmsg = (
         "你是一個角色資訊提取器。請分析使用者提供的故事文字，並找出其中的主角和關鍵角色。\n"
@@ -309,14 +344,26 @@ def _extract_characters_from_text(text: str) -> list:
             resp = _oai_client.chat.completions.create(
                 model="gpt-4o-mini", messages=msgs, temperature=0.2, response_format={"type": "json_object"}
             )
-            return json.loads(resp.choices[0].message.content.strip())
+            raw_response_content = resp.choices[0].message.content.strip()
         else:
             resp = _oai_client.ChatCompletion.create(
                 model="gpt-4o-mini", messages=msgs, temperature=0.2, response_format={"type": "json_object"}
             )
-            return json.loads(resp["choices"][0]["message"]["content"].strip())
+            raw_response_content = resp["choices"][0]["message"]["content"].strip()
+        
+        # 使用新的輔助函式來清理回覆
+        cleaned_json = _clean_json_string(raw_response_content)
+        
+        if not cleaned_json:
+            log.error("❌ _extract_characters_from_text: Failed to clean JSON from response.")
+            return []
+            
+        log.info(f"✅ OpenAI API raw response (cleaned): {cleaned_json[:500]}")
+        return json.loads(cleaned_json)
+        
     except Exception as e:
         log.error("❌ _extract_characters_from_text failed: %s", e)
+        log.error("❌ Traceback: %s", traceback.format_exc())
         return []
 
 def maybe_update_character_card(sess, user_id, text):
