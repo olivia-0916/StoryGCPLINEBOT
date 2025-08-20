@@ -179,8 +179,13 @@ class CharacterCard:
         parts = []
         
         # 處理名稱與角色種類
-        if self.name and "species" in self.features and self.features["species"] is not None:
-            parts.append(f"a {self.features['species']} named {self.name}")
+        species = self.features.get("species")
+        if species:
+            if "color" in self.features and species in ["fox", "deer", "cat", "dog"]:
+                # 特殊處理動物顏色，強化描述
+                parts.append(f"a {self.features['color']} {species} named {self.name}")
+            else:
+                parts.append(f"a {species} named {self.name}")
         elif self.name:
             parts.append(f"{self.name}")
         
@@ -201,7 +206,8 @@ class CharacterCard:
                 hair_desc += hair_color + " "
             if hair_style:
                 hair_desc += hair_style
-            parts.append(f"with {hair_desc.strip()} hair")
+            if hair_desc:
+                parts.append(f"with {hair_desc.strip()} hair")
         
         # 處理服裝
         top_color = self.features.get("top_color")
@@ -384,6 +390,15 @@ def render_character_card_as_text(characters: dict) -> str:
 
     joined_prompts = " and ".join(char_prompts)
     return f"{joined_prompts}. Keep character appearance consistent."
+
+# 新增：從文字段落中提取角色名稱
+def _extract_characters_from_text(text: str, all_characters: dict) -> list:
+    found_chars = []
+    for name in all_characters.keys():
+        if name in text:
+            found_chars.append(name)
+    return found_chars
+
 
 # =============== 摘要與分段 ===============
 def generate_story_summary(messages, characters_list):
@@ -609,7 +624,18 @@ def _draw_and_push(user_id, idx, extra):
             return
 
         scene = paras[idx]
-        char_hint = render_character_card_as_text(sess.get("characters", {}))
+        
+        # 步驟一：從當前段落中提取角色名稱
+        mentioned_char_names = _extract_characters_from_text(scene, sess.get("characters", {}))
+        
+        # 步驟二：根據提取到的名稱，篩選出對應的角色卡
+        filtered_characters = {name: sess["characters"][name] for name in mentioned_char_names if name in sess["characters"]}
+        
+        # 步驟三：後台列印出用於畫圖的角色卡資訊
+        log.info("🖼️ [bg] Characters for image generation: %s", json.dumps({k:v.__dict__ for k,v in filtered_characters.items()}, ensure_ascii=False))
+
+        # 步驟四：使用篩選後的角色卡生成提示詞
+        char_hint = render_character_card_as_text(filtered_characters)
         prompt = build_scene_prompt(scene_desc=scene, char_hint=char_hint, extra=extra)
         log.info("🧩 [bg] prompt head: %s", prompt[:200])
 
