@@ -168,11 +168,12 @@ class CharacterCard:
     def __init__(self, name_hint="主角"):
         self.name = name_hint
         self.gender = None
-        # 預設值
+        self.species = None 
         self.features = {
             "top_color": None, "top_type": None,
             "bottom_color": None, "bottom_type": None,
-            "hair_color": "brown", "hair_style": "straight hair",
+            "hair_color": None, "hair_style": None,
+            "eye_color": None,
             "accessory_glasses": False,
             "accessory_hat": False
         }
@@ -186,36 +187,44 @@ class CharacterCard:
     def render_prompt(self):
         parts = []
         
-        # 優先處理性別與名稱
-        if self.name and self.name != "主角":
-            parts.append(self.name)
-        elif self.gender == "男":
-            parts.append("a boy")
-        elif self.gender == "女":
-            parts.append("a girl")
+        # 優先處理物種、性別與名稱
+        if self.species == "human":
+            if self.gender == "male":
+                parts.append("a boy")
+            elif self.gender == "female":
+                parts.append("a girl")
+            else:
+                parts.append("a person")
+        elif self.species:
+            parts.append(f"a {self.species}")
         else:
             parts.append("a person")
 
-        # 服裝
-        if self.features["top_color"] and self.features["top_type"]:
-            parts.append(f"wears a {self.features['top_color']} {self.features['top_type']}")
-        elif self.features["top_color"]:
-            parts.append(f"wears a {self.features['top_color']} top")
-        
-        if self.features["bottom_color"] and self.features["bottom_type"]:
-            parts.append(f"wears a {self.features['bottom_color']} {self.features['bottom_type']}")
-        elif self.features["bottom_color"]:
-            parts.append(f"wears {self.features['bottom_color']} bottoms")
-            
-        # 髮型
-        if self.features["hair_color"] and self.features["hair_style"]:
-            parts.append(f"with {self.features['hair_color']} {self.features['hair_style']}")
-        elif self.features["hair_color"]:
-            parts.append(f"with {self.features['hair_color']} hair")
-        elif self.features["hair_style"]:
-            parts.append(f"with {self.features['hair_style']}")
+        if self.name and self.name != "主角":
+            parts.append(f"named {self.name}")
 
-        # 配件
+        if self.species == "human":
+            if self.features["top_color"] and self.features["top_type"]:
+                parts.append(f"wears a {self.features['top_color']} {self.features['top_type']}")
+            elif self.features["top_color"]:
+                parts.append(f"wears a {self.features['top_color']} top")
+            
+            if self.features["bottom_color"] and self.features["bottom_type"]:
+                parts.append(f"wears a {self.features['bottom_color']} {self.features['bottom_type']}")
+            elif self.features["bottom_color"]:
+                parts.append(f"wears {self.features['bottom_color']} bottoms")
+            
+            hair_parts = []
+            if self.features["hair_color"]:
+                hair_parts.append(self.features["hair_color"])
+            if self.features["hair_style"]:
+                hair_parts.append(self.features["hair_style"])
+            if hair_parts:
+                parts.append(f"with {' '.join(hair_parts)}")
+            
+            if self.features["eye_color"]:
+                parts.append(f"with {self.features['eye_color']} eyes")
+            
         if self.features["accessory_glasses"]:
             parts.append("wears glasses")
         if self.features["accessory_hat"]:
@@ -233,10 +242,6 @@ def _ensure_session(user_id):
     user_seeds.setdefault(user_id, random.randint(100000, 999999))
     if sess.get("story_id") is None:
         sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
-    # 這裡確保至少有兩個預設角色
-    if not sess["characters"]:
-        sess["characters"]["主角1"] = CharacterCard(name_hint="主角1")
-        sess["characters"]["主角2"] = CharacterCard(name_hint="主角2")
     return sess
 
 def save_chat(user_id, role, text):
@@ -278,100 +283,99 @@ def load_current_story(user_id, sess):
     except Exception as e:
         log.warning("⚠️ load_current_story failed: %s", e)
 
-# =============== 角色卡抽取（中文規則）===============
-COLOR_MAP = {
-    "紫色":"purple","紫":"purple","黃色":"yellow","黃":"yellow","紅色":"red","紅":"red","藍色":"blue","藍":"blue",
-    "綠色":"green","綠":"green","黑色":"black","黑":"black","白色":"white","白":"white","粉紅色":"pink","粉紅":"pink","粉":"pink",
-    "橘色":"orange","橘":"orange","棕色":"brown","棕":"brown","咖啡色":"brown","咖啡":"brown","灰色":"gray","灰":"gray"
-}
-TOP_WORDS = r"(上衣|衣服|襯衫|T恤|T-shirt|外套|毛衣|連帽衣|風衣)"
-BOTTOM_WORDS = r"(長裙|短裙|裙子|褲子|長褲|短褲|牛仔褲)"
-HAIR_STYLE_WORDS = r"(長髮|短髮|直髮|捲髮|波浪|馬尾|雙馬尾|辮子)"
-GENDER_WORDS = r"(男孩|女孩|男性|女性|男生|女生|哥哥|姊姊|弟弟|妹妹|叔叔|阿姨|爸爸|媽媽)"
 
-def _find_color(text):
-    for zh, en in COLOR_MAP.items():
-        # 確保顏色前面有空格或在句首，避免誤判
-        if re.search(f"(^|\\s){zh}", text):
-            return zh, en
-    return None, None
+# 新增：讓 AI 模型提取角色資訊
+def _extract_characters_from_text(text: str) -> list:
+    sysmsg = (
+        "你是一個角色資訊提取器。請分析使用者提供的故事文字，並找出其中的主角和關鍵角色。\n"
+        "對於每個角色，請盡可能提取以下資訊：\n"
+        "1. **`name`** (string): 如果有名字，請提取。若無，請用 null。\n"
+        "2. **`species`** (string): 判斷角色的物種，例如 'human', 'fox', 'deer' 等。若無法判斷，請用 'unknown'。\n"
+        "3. **`gender`** (string): 判斷性別，例如 'male', 'female'。若無法判斷，請用 null。\n"
+        "4. **`features`** (object): 找出角色的外觀特徵，例如 'hair_color', 'eye_color', 'top_color' 等。請使用英文描述。\n"
+        "   - 眼睛顏色：'eye_color': 'green'\n"
+        "   - 頭髮顏色：'hair_color': 'brown'\n"
+        "   - 頭髮樣式：'hair_style': 'straight hair'\n"
+        "   - 上衣顏色：'top_color': 'red'\n"
+        "   - 帽子：'accessory_hat': true\n"
+        "   - 若無該特徵，請不要在 features 中包含該鍵值。\n"
+        "**請以一個 JSON 陣列的形式輸出，不要有任何多餘的文字或解釋，只需 JSON 本身。**\n"
+        "例如：\n"
+        "[{\"name\": \"安琪\", \"species\": \"human\", \"gender\": \"female\", \"features\": {\"hair_color\": \"brown\", \"eye_color\": \"green\"}}, {\"name\": \"可可\", \"species\": \"fox\", \"gender\": null, \"features\": {\"color\": \"white\"}}]"
+    )
+    try:
+        msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": text}]
+        if _openai_mode == "sdk1":
+            resp = _oai_client.chat.completions.create(
+                model="gpt-4o-mini", messages=msgs, temperature=0.2, response_format={"type": "json_object"}
+            )
+            return json.loads(resp.choices[0].message.content.strip())
+        else:
+            resp = _oai_client.ChatCompletion.create(
+                model="gpt-4o-mini", messages=msgs, temperature=0.2, response_format={"type": "json_object"}
+            )
+            return json.loads(resp["choices"][0]["message"]["content"].strip())
+    except Exception as e:
+        log.error("❌ _extract_characters_from_text failed: %s", e)
+        return []
 
 def maybe_update_character_card(sess, user_id, text):
-    updated = False
-    
-    # 根據關鍵字判斷要更新哪個角色
-    target_char = None
-    if re.search(r"男|男生|男孩|哥哥|弟弟", text):
-        target_char = next((c for c in sess["characters"].values() if c.gender == "男"), None)
-        if not target_char:
-            target_char = CharacterCard(name_hint="男主角")
-            target_char.gender = "男"
-            sess["characters"]["男主角"] = target_char
-    elif re.search(r"女|女生|女孩|姊姊|妹妹", text):
-        target_char = next((c for c in sess["characters"].values() if c.gender == "女"), None)
-        if not target_char:
-            target_char = CharacterCard(name_hint="女主角")
-            target_char.gender = "女"
-            sess["characters"]["女主角"] = target_char
-    else:
-        # 如果沒有明確性別，就更新第一個角色
-        target_char = list(sess["characters"].values())[0]
+    try:
+        new_chars_data = _extract_characters_from_text(text)
+        updated = False
+        
+        for char_data in new_chars_data:
+            name = char_data.get("name")
+            species = char_data.get("species")
+            gender = char_data.get("gender")
+            features = char_data.get("features", {})
+            
+            if not name:
+                # 如果沒有名字，嘗試用物種來尋找
+                target_card = next((c for c in sess["characters"].values() if c.species == species), None)
+            else:
+                target_card = sess["characters"].get(name)
 
-    if not target_char: return
-    
-    # 1) 上衣
-    m_top = re.search(TOP_WORDS, text)
-    if m_top:
-        zh_top = m_top.group(1)
-        zh_color, en_color = _find_color(text)
-        if en_color:
-            target_char.update("top_color", en_color)
-            target_char.update("top_type", zh_top)
-            updated = True
-
-    # 2) 下半身
-    m_bottom = re.search(BOTTOM_WORDS, text)
-    if m_bottom:
-        zh_bottom = m_bottom.group(1)
-        zh_color, en_color = _find_color(text)
-        if en_color:
-            target_char.update("bottom_color", en_color)
-            target_char.update("bottom_type", zh_bottom)
-            updated = True
-
-    # 3) 頭髮
-    if "髮" in text or "頭髮" in text:
-        zh_color, en_color = _find_color(text)
-        if en_color:
-            target_char.update("hair_color", en_color)
-            updated = True
-        m_style = re.search(HAIR_STYLE_WORDS, text)
-        if m_style:
-            target_char.update("hair_style", m_style.group(1))
-            updated = True
-
-    # 4) 眼鏡 / 帽子
-    if re.search(r"(戴|配).*(眼鏡)", text):
-        if target_char.update("accessory_glasses", True): updated = True
-    if re.search(r"(戴|戴著).*(帽|帽子)", text):
-        if target_char.update("accessory_hat", True): updated = True
-
-    if updated:
-        log.info("🧬 character_card updated | user=%s | target=%s | card=%s", user_id, target_char.name, json.dumps(target_char.features, ensure_ascii=False))
-        save_current_story(user_id, sess)
+            if not target_card:
+                # 建立新角色卡
+                new_card = CharacterCard(name_hint=name or f"角色-{uuid.uuid4().hex[:4]}")
+                new_card.name = name
+                new_card.species = species
+                new_card.gender = gender
+                new_card.features.update(features)
+                sess["characters"][new_card.name] = new_card
+                updated = True
+                log.info("➕ created new character: %s", new_card.name)
+            else:
+                # 更新現有角色卡
+                if species and not target_card.species:
+                    target_card.species = species
+                    updated = True
+                if gender and not target_card.gender:
+                    target_card.gender = gender
+                    updated = True
+                for key, value in features.items():
+                    if target_card.update(key, value):
+                        updated = True
+            
+        if updated:
+            log.info("🧬 character_cards updated | user=%s | cards=%s", user_id, json.dumps({k: v.__dict__ for k,v in sess["characters"].items()}, ensure_ascii=False))
+            save_current_story(user_id, sess)
+            
+    except Exception as e:
+        log.exception("❌ maybe_update_character_card error: %s", e)
 
 def render_character_card_as_text(characters: dict) -> str:
     if not characters:
         return ""
     
     char_prompts = []
-    # 確保順序固定
     sorted_chars = sorted(characters.items())
     
-    for i, (name, card) in enumerate(sorted_chars):
+    for name, card in sorted_chars:
         char_prompt = card.render_prompt()
         if char_prompt:
-            char_prompts.append(f"Character {i+1}: a {char_prompt}")
+            char_prompts.append(char_prompt)
     
     if not char_prompts:
         return ""
@@ -385,7 +389,8 @@ def generate_story_summary(messages):
     sysmsg = (
         "請將以下對話整理成 5 段完整故事，每段 2–3 句（約 60–120 字）。"
         "內容應自然呈現場景、角色、主要動作與關鍵物件。\n"
-        "**請用編號列點方式呈現，格式為：**\n"
+        "**請用編號列點方式呈現，並盡量使用角色的具體名稱，避免使用「他們」等代詞，以確保圖像生成的角色一致性。**\n"
+        "格式為：\n"
         "1. XXXXX\n"
         "2. XXXXX\n"
         "3. XXXXX\n"
@@ -532,10 +537,13 @@ def handle_message(event):
         paras = extract_paragraphs(summary)
         sess["paras"] = paras
         sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
-        # 重置角色卡，但保留性別設定
-        for name, char_card in sess["characters"].items():
+        # 重置角色卡，但保留性別與物種
+        old_chars = sess["characters"].copy()
+        sess["characters"] = {}
+        for name, char_card in old_chars.items():
             new_card = CharacterCard(name_hint=name)
             new_card.gender = char_card.gender
+            new_card.species = char_card.species
             sess["characters"][name] = new_card
         
         save_current_story(user_id, sess)
@@ -613,7 +621,6 @@ def _draw_and_push(user_id, idx, extra):
             ImageSendMessage(public_url, public_url),
         ]
         
-        # 檢查是否有下一段故事
         if idx + 1 < len(paras):
             next_scene_preview = paras[idx + 1]
             msgs.append(TextSendMessage(f"要不要繼續畫第 {idx+2} 段內容呢？\n下一段的故事是：\n「{next_scene_preview}」"))
