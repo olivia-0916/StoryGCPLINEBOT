@@ -165,70 +165,61 @@ def openai_images_generate(prompt: str, size: str):
 
 # --- 角色卡類別 ---
 class CharacterCard:
-    def __init__(self, name_hint="主角"):
-        self.name = name_hint
-        self.gender = None
-        self.species = None
-        self.features = {
-            "top_color": None, "top_type": None,
-            "bottom_color": None, "bottom_type": None,
-            "hair_color": None, "hair_style": None,
-            "eye_color": None,
-            "accessory_glasses": False,
-            "accessory_hat": False
-        }
+    def __init__(self, name="無名氏"):
+        self.name = name
+        self.features = {}
     
     def update(self, key, value):
-        if key in self.features:
+        if value:
             self.features[key] = value
             return True
         return False
-    
+        
     def render_prompt(self):
         parts = []
         
-        # 優先處理物種、性別與名稱
-        if self.species == "human":
-            if self.gender == "male":
+        # 處理名稱與角色種類
+        if self.name and "species" in self.features:
+            parts.append(f"a {self.features['species']} named {self.name}")
+        elif self.name:
+            parts.append(f"{self.name}")
+        
+        # 處理性別
+        if "gender" in self.features:
+            if self.features["gender"] == "男":
                 parts.append("a boy")
-            elif self.gender == "female":
+            elif self.features["gender"] == "女":
                 parts.append("a girl")
-            else:
-                parts.append("a person")
-        elif self.species and self.species != "unknown":
-            parts.append(f"a {self.species}")
-        else:
-            parts.append("a person")
+                
+        # 處理外觀特徵
+        if "hair_color" in self.features or "hair_style" in self.features:
+            hair_desc = ""
+            if "hair_color" in self.features:
+                hair_desc += self.features["hair_color"] + " "
+            if "hair_style" in self.features:
+                hair_desc += self.features["hair_style"]
+            if hair_desc:
+                parts.append(f"with {hair_desc.strip()} hair")
+        
+        # 處理服裝
+        if "top_color" in self.features and "top_type" in self.features:
+            parts.append(f"wears a {self.features['top_color']} {self.features['top_type']}")
+        elif "top_color" in self.features:
+            parts.append(f"wears a {self.features['top_color']} top")
+        if "bottom_color" in self.features and "bottom_type" in self.features:
+            parts.append(f"wears {self.features['bottom_color']} {self.features['bottom_type']}")
+        elif "bottom_color" in self.features:
+            parts.append(f"wears {self.features['bottom_color']} bottoms")
 
-        if self.name and self.name != "主角":
-            parts.append(f"named {self.name}")
-
-        if self.species == "human":
-            if self.features["top_color"] and self.features["top_type"]:
-                parts.append(f"wears a {self.features['top_color']} {self.features['top_type']}")
-            elif self.features["top_color"]:
-                parts.append(f"wears a {self.features['top_color']} top")
-            
-            if self.features["bottom_color"] and self.features["bottom_type"]:
-                parts.append(f"wears a {self.features['bottom_color']} {self.features['bottom_type']}")
-            elif self.features["bottom_color"]:
-                parts.append(f"wears {self.features['bottom_color']} bottoms")
-            
-            hair_parts = []
-            if self.features["hair_color"]:
-                hair_parts.append(self.features["hair_color"])
-            if self.features["hair_style"]:
-                hair_parts.append(self.features["hair_style"])
-            if hair_parts:
-                parts.append(f"with {' '.join(hair_parts)} hair")
-            
-            if self.features["eye_color"]:
-                parts.append(f"with {self.features['eye_color']} eyes")
-            
-        if self.features["accessory_glasses"]:
+        # 處理配件
+        if "accessory_glasses" in self.features and self.features["accessory_glasses"]:
             parts.append("wears glasses")
-        if self.features["accessory_hat"]:
+        if "accessory_hat" in self.features and self.features["accessory_hat"]:
             parts.append("wears a hat")
+        
+        # 其他特徵
+        if "extra_features" in self.features:
+            parts.append(self.features["extra_features"])
         
         return ", ".join(parts)
 
@@ -247,7 +238,8 @@ def _ensure_session(user_id):
 def save_chat(user_id, role, text):
     if not db: return
     try:
-        db.collection("users").document(user_id).collection("chat").add({
+        doc_ref = db.collection("users").document(user_id).collection("chat").document()
+        doc_ref.set({
             "role": role, "text": text, "timestamp": firestore.SERVER_TIMESTAMP
         })
     except Exception as e:
@@ -256,10 +248,12 @@ def save_chat(user_id, role, text):
 def save_current_story(user_id, sess):
     if not db: return
     try:
+        char_data = {k: v.__dict__ for k, v in sess.get("characters", {}).items()}
+        
         doc = {
             "story_id": sess.get("story_id"),
             "paragraphs": sess.get("paras", []),
-            "characters": {k: v.__dict__ for k, v in sess.get("characters", {}).items()},
+            "characters": char_data,
             "updated_at": firestore.SERVER_TIMESTAMP
         }
         db.collection("users").document(user_id).collection("story").document("current").set(doc)
@@ -277,171 +271,101 @@ def load_current_story(user_id, sess):
             
             loaded_chars = d.get("characters", {})
             for name, char_dict in loaded_chars.items():
-                card = CharacterCard(name_hint=name)
-                # 確保載入的 features 是一個字典
-                if 'features' in char_dict and char_dict['features'] is None:
-                    char_dict['features'] = {}
+                card = CharacterCard(name=name)
                 card.__dict__.update(char_dict)
                 sess["characters"][name] = card
     except Exception as e:
         log.warning("⚠️ load_current_story failed: %s", e)
 
 
-# 新增一個輔助函式，專門用來清理 JSON 字串
-def _clean_json_string(text: str) -> str:
-    # 移除前後的換行、空格以及可能的 markdown 區塊
-    text = text.strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.endswith("```"):
-        text = text[:-3]
-    # 移除前後的任何額外文字，只保留最外層的 [ ] 或 { } 區塊
-    start_index = text.find('[')
-    if start_index == -1:
-        start_index = text.find('{')
+def maybe_update_character_card(sess, user_id, text):
+    """
+    使用LLM來動態識別角色及其特徵，並更新角色卡。
+    """
+    if not _oai_client:
+        return
     
-    if start_index != -1:
-        # 從第一個 [ 或 { 開始，找到對應的結尾 ] 或 }
-        brace_count = 0
-        in_string = False
-        end_index = -1
-        for i, char in enumerate(text[start_index:]):
-            if char == '"' and (i == 0 or text[start_index+i-1] != '\\'):
-                in_string = not in_string
-            if not in_string:
-                if char == '[' or char == '{':
-                    brace_count += 1
-                elif char == ']' or char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        end_index = start_index + i
-                        break
-        
-        if end_index != -1:
-            return text[start_index:end_index + 1]
+    # 將現有角色卡轉為文字描述，提供給LLM作為上下文
+    char_list = [f"Name: {c.name}, Features: {c.features}" for c in sess["characters"].values()]
+    char_context = "Existing characters: " + "; ".join(char_list) if char_list else ""
     
-    return ""
-
-# 修改 _extract_characters_from_text 函式
-def _extract_characters_from_text(text: str) -> list:
-    sysmsg = (
-        "你是一個角色資訊提取器。請分析使用者提供的故事文字，並找出其中的主角和關鍵角色。\n"
-        "對於每個角色，請盡可能提取以下資訊：\n"
-        "1. **`name`** (string): 如果有名字，請提取。若無，請用 null。\n"
-        "2. **`species`** (string): 判斷角色的物種，例如 'human', 'fox', 'deer', 'bird' 等。若無法判斷，請用 'unknown'。\n"
-        "3. **`gender`** (string): 判斷性別，例如 'male', 'female'。若無法判斷，請用 null。\n"
-        "4. **`features`** (object): 找出角色的外觀特徵，例如 'hair_color', 'eye_color', 'top_color' 等。請使用英文描述。若無任何特徵，請提供一個空物件 `{}`，**絕不**使用 null。\n"
-        "   - 眼睛顏色：'eye_color': 'green'\n"
-        "   - 頭髮顏色：'hair_color': 'brown'\n"
-        "   - 頭髮樣式：'hair_style': 'straight hair'\n"
-        "   - 上衣顏色：'top_color': 'red'\n"
-        "   - 帽子：'accessory_hat': true\n"
-        "   - 若無該特徵，請不要在 features 中包含該鍵值。\n"
-        "**請以一個 JSON 陣列的形式輸出，不要有任何多餘的文字或解釋，只需 JSON 本身。**\n"
-        "例如：\n"
-        "[{\"name\": \"安琪\", \"species\": \"human\", \"gender\": \"female\", \"features\": {\"hair_color\": \"brown\", \"eye_color\": \"green\"}}, {\"name\": \"可可\", \"species\": \"fox\", \"gender\": null, \"features\": {\"color\": \"white\"}}]"
-    )
-    raw_response_content = ""
+    sysmsg = f"""
+    你是一個故事角色分析機器人。你的任務是從用戶的句子中識別新的角色或現有角色的新特徵。
+    
+    分析步驟：
+    1. 識別句子中是否提到了**明確的角色名稱**（例如：小明、小狗、一隻貓）。名稱可以是人名、動物名或任何具體稱謂。
+    2. 如果是新的角色名稱，請為它建立一個新角色。
+    3. 提取與該角色相關的**外觀特徵**（如：髮色、髮型、衣服顏色、穿著、配件等）和**物種**（例如：男孩、女孩、狗、貓、機器人）。
+    4. 請將分析結果以 JSON 格式輸出，不要有任何額外的文字或解釋。
+    5. JSON 格式必須是：`{{ "name": "角色名稱", "features": {{ "feature_key": "feature_value", ... }} }}`。
+       - `name` 欄位必須是從句子中提取的具體名稱。
+       - `features` 字典中的 key 應為英文，value 為英文或簡潔中文。
+       - 例如：`{{ "name": "小明", "features": {{ "species": "boy", "hair_color": "black", "top_type": "T-shirt", "top_color": "blue" }} }}`。
+    
+    用戶輸入：{text}
+    """
+    
     try:
-        msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": text}]
+        t0 = time.time()
+        
         if _openai_mode == "sdk1":
             resp = _oai_client.chat.completions.create(
-                model="gpt-4o-mini", messages=msgs, temperature=0.2, response_format={"type": "json_object"}
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": sysmsg}],
+                temperature=0.3,
             )
-            raw_response_content = resp.choices[0].message.content.strip()
+            result_text = resp.choices[0].message.content.strip()
         else:
             resp = _oai_client.ChatCompletion.create(
-                model="gpt-4o-mini", messages=msgs, temperature=0.2, response_format={"type": "json_object"}
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": sysmsg}],
+                temperature=0.3,
             )
-            raw_response_content = resp["choices"][0]["message"]["content"].strip()
-        
-        # 使用新的輔助函式來清理回覆
-        cleaned_json = _clean_json_string(raw_response_content)
-        
-        if not cleaned_json:
-            log.error("❌ _extract_characters_from_text: Failed to clean JSON from response.")
-            return []
+            result_text = resp["choices"][0]["message"]["content"].strip()
             
-        log.info(f"✅ OpenAI API raw response (cleaned): {cleaned_json[:500]}")
-        
-        parsed_data = json.loads(cleaned_json)
-        
-        # 修正邏輯：如果回傳的是單一物件，將其包裝成一個列表
-        if isinstance(parsed_data, dict):
-            return [parsed_data]
-        elif isinstance(parsed_data, list):
-            return parsed_data
-        else:
-            log.error("❌ _extract_characters_from_text: Unexpected JSON format.")
-            return []
+        # 嘗試解析 JSON
+        try:
+            json_data = json.loads(result_text)
+            char_name = json_data.get("name")
+            features = json_data.get("features", {})
             
-    except json.decoder.JSONDecodeError as e:
-        log.error("❌ _extract_characters_from_text JSON decode error: %s", e)
-        log.error("❌ Raw content that caused error: %s", raw_response_content)
-        return []
-    except Exception as e:
-        log.error("❌ _extract_characters_from_text failed: %s", e)
-        log.error("❌ Traceback: %s", traceback.format_exc())
-        return []
-
-def maybe_update_character_card(sess, user_id, text):
-    try:
-        new_chars_data = _extract_characters_from_text(text)
-        updated = False
-        
-        for char_data in new_chars_data:
-            name = char_data.get("name")
-            species = char_data.get("species")
-            gender = char_data.get("gender")
-            # 修正：確保 features 是一個字典，即使 AI 回應的是 null
-            features = char_data.get("features", {}) or {} 
+            if not char_name:
+                log.info("❌ LLM failed to extract a name.")
+                return
             
-            target_card = None
-            if name:
-                target_card = sess["characters"].get(name)
-            elif species and species != "unknown":
-                # 如果沒有名字，嘗試用物種來尋找
-                target_card = next((c for c in sess["characters"].values() if c.species == species), None)
-
-            if not target_card:
-                # 建立新角色卡
-                new_card = CharacterCard(name_hint=name or f"角色-{uuid.uuid4().hex[:4]}")
-                new_card.name = name
-                new_card.species = species
-                new_card.gender = gender
-                if isinstance(features, dict):
-                    new_card.features.update(features)
-                sess["characters"][new_card.name or new_card.name_hint] = new_card
-                updated = True
-                log.info("➕ created new character: %s", new_card.name or new_card.name_hint)
+            # 檢查是否已存在該角色
+            if char_name in sess["characters"]:
+                char_card = sess["characters"][char_name]
+                for key, value in features.items():
+                    if char_card.update(key, value):
+                        log.info(f"🧬 [LLM] Updated character card | user={user_id} | name={char_name} | key={key} | value={value}")
             else:
-                # 更新現有角色卡
-                if species and not target_card.species:
-                    target_card.species = species
-                    updated = True
-                if gender and not target_card.gender:
-                    target_card.gender = gender
-                    updated = True
-                if isinstance(features, dict):
-                    for key, value in features.items():
-                        if target_card.update(key, value):
-                            updated = True
-            
-        if updated:
-            log.info("🧬 character_cards updated | user=%s | cards=%s", user_id, json.dumps({k: v.__dict__ for k,v in sess["characters"].items()}, ensure_ascii=False))
+                # 建立新角色卡
+                new_char_card = CharacterCard(name=char_name)
+                for key, value in features.items():
+                    new_char_card.update(key, value)
+                sess["characters"][char_name] = new_char_card
+                log.info(f"✨ [LLM] New character created | user={user_id} | name={char_name} | features={json.dumps(new_char_card.features, ensure_ascii=False)}")
+                
             save_current_story(user_id, sess)
+
+        except json.JSONDecodeError:
+            log.warning(f"⚠️ LLM did not return valid JSON. Response: {result_text}")
+        except Exception as e:
+            log.error(f"💥 Failed to process LLM character extraction result: {e}")
             
     except Exception as e:
-        log.exception("❌ maybe_update_character_card error: %s", e)
+        log.error(f"❌ OpenAI character extraction failed: {e}")
 
 def render_character_card_as_text(characters: dict) -> str:
     if not characters:
         return ""
     
     char_prompts = []
+    # 確保順序固定
     sorted_chars = sorted(characters.items())
     
-    for name, card in sorted_chars:
+    for _, card in sorted_chars:
         char_prompt = card.render_prompt()
         if char_prompt:
             char_prompts.append(char_prompt)
@@ -449,16 +373,17 @@ def render_character_card_as_text(characters: dict) -> str:
     if not char_prompts:
         return ""
 
-    joined_prompts = "; ".join([f"The character {p}" for p in char_prompts])
+    joined_prompts = " and ".join(char_prompts)
     return f"{joined_prompts}. Keep character appearance consistent."
 
 # =============== 摘要與分段 ===============
-def generate_story_summary(messages):
+def generate_story_summary(messages, characters_list):
+    char_names_str = "、".join(characters_list) if characters_list else "主角"
     sysmsg = (
-        "請將以下對話整理成 5 段完整故事，每段 2–3 句（約 60–120 字）。"
-        "內容應自然呈現場景、角色、主要動作與關鍵物件。\n"
-        "**請用編號列點方式呈現，並盡量使用角色的具體名稱，避免使用「他們」等代詞，以確保圖像生成的角色一致性。**\n"
-        "格式為：\n"
+        f"請將以下對話整理成 5 段完整故事，每段 2–3 句（約 60–120 字）。"
+        f"在故事中，請**盡量使用明確的角色名稱**（例如：{char_names_str}），**不要用「他們」這類代詞**。\n"
+        f"內容應自然呈現場景、角色、主要動作與關鍵物件。\n"
+        f"**請用編號列點方式呈現，格式為：**\n"
         "1. XXXXX\n"
         "2. XXXXX\n"
         "3. XXXXX\n"
@@ -499,9 +424,9 @@ BASE_STYLE = (
 
 def build_scene_prompt(scene_desc: str, char_hint: str = "", extra: str = ""):
     parts = [BASE_STYLE, f"Scene: {scene_desc}"]
-    if char_hint: parts.insert(1, char_hint)
+    if char_hint: parts.append(char_hint)
     if extra:    parts.append(extra)
-    return " ".join(parts)
+    return ", ".join(parts)
 
 # =============== Flask routes ===============
 @app.route("/")
@@ -596,27 +521,15 @@ def handle_message(event):
         sess["messages"] = sess["messages"][-60:]
     save_chat(user_id, "user", text)
 
-    # 將耗時的角色卡更新任務放入背景執行緒
-    # 這樣主程式就不會被阻擋，可以立刻處理後續的邏輯或回覆
+    # 在每次用戶發言後，嘗試更新角色卡
     threading.Thread(target=maybe_update_character_card, args=(sess, user_id, text), daemon=True).start()
 
     # 2. 處理「整理」指令
     if re.search(r"(整理|總結|summary)", text):
-        # 立即回覆「處理中」訊息
-        line_bot_api.reply_message(reply_token, TextSendMessage("✨ 正在為你總結故事，請稍候一下喔！"))
+        line_bot_api.reply_message(reply_token, TextSendMessage("正在為你整理故事，請稍候一下下喔！"))
         
-        # 在背景執行緒中執行耗時的總結操作
-        def _summarize_and_push():
-            compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
-            summary = generate_story_summary(compact) or "1.\n2.\n3.\n4.\n5."
-            paras = extract_paragraphs(summary)
-            sess["paras"] = paras
-            sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
-            save_current_story(user_id, sess)
-            line_bot_api.push_message(user_id, TextSendMessage("✨ 故事總結完成！這就是我們目前的故事：\n" + summary))
-            save_chat(user_id, "assistant", summary)
-        
-        threading.Thread(target=_summarize_and_push, daemon=True).start()
+        # 使用線程處理耗時的總結任務
+        threading.Thread(target=_summarize_and_push, args=(user_id,), daemon=True).start()
         return
 
     # 3. 處理「畫圖」指令
@@ -626,10 +539,10 @@ def handle_message(event):
                  '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
         idx = n_map[m.group(2)] - 1
         extra = re.sub(r"(畫|請畫|幫我畫)第[一二三四五12345]段", "", text).strip(" ，,。.!！")
-        
+    
         # 檢查故事內容是否存在
         if not sess.get("paras"):
-            line_bot_api.reply_message(reply_token, TextSendMessage("請先說一個故事或用「整理」指令來總結內容，我才能開始畫喔！"))
+            line_bot_api.reply_message(reply_token, TextSendMessage("請先說一個故事或用「整理目前的故事」指令來總結內容，我才能開始畫喔！"))
             return
 
         line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！第 {idx+1} 段的插圖開始生成，請稍候一下下喔～"))
@@ -638,7 +551,6 @@ def handle_message(event):
 
     # 4. 處理一般對話，交由 AI 模型來生成引導
     guiding_response = generate_guiding_response(sess["messages"])
-
     line_bot_api.reply_message(reply_token, TextSendMessage(guiding_response))
     save_chat(user_id, "assistant", guiding_response)
 
@@ -653,8 +565,28 @@ def handle_non_text(event):
         pass
 
 # =============== 背景生成並 push ===============
-def _get_paragraphs_for_user(sess):
-    return sess.get("paras") or []
+def _summarize_and_push(user_id):
+    try:
+        sess = _ensure_session(user_id)
+        load_current_story(user_id, sess)
+        
+        compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
+        characters_list = list(sess["characters"].keys())
+        summary = generate_story_summary(compact, characters_list) or "1.\n2.\n3.\n4.\n5."
+        paras = extract_paragraphs(summary)
+        
+        sess["paras"] = paras
+        sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
+        save_current_story(user_id, sess)
+        
+        line_bot_api.push_message(user_id, TextSendMessage("✨ 故事總結完成！這就是我們目前的故事：\n" + summary))
+        save_chat(user_id, "assistant", summary)
+    except Exception as e:
+        log.exception("💥 [bg] summarize fail: %s", e)
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage("整理故事時遇到小狀況，等等再試一次可以嗎？"))
+        except Exception:
+            pass
 
 def _draw_and_push(user_id, idx, extra):
     try:
@@ -662,7 +594,7 @@ def _draw_and_push(user_id, idx, extra):
         load_current_story(user_id, sess)
         log.info("🎯 [bg] draw request | user=%s | idx=%d | extra=%s | story_id=%s", user_id, idx, extra, sess.get("story_id"))
 
-        paras = _get_paragraphs_for_user(sess)
+        paras = sess.get("paras") or []
         if not paras or idx >= len(paras):
             line_bot_api.push_message(user_id, TextSendMessage("我需要再多一點故事內容，才能開始畫喔～"))
             return
@@ -689,6 +621,7 @@ def _draw_and_push(user_id, idx, extra):
             ImageSendMessage(public_url, public_url),
         ]
         
+        # 檢查是否有下一段故事
         if idx + 1 < len(paras):
             next_scene_preview = paras[idx + 1]
             msgs.append(TextSendMessage(f"要不要繼續畫第 {idx+2} 段內容呢？\n下一段的故事是：\n「{next_scene_preview}」"))
