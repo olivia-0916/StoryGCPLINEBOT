@@ -285,22 +285,17 @@ def maybe_update_character_card(sess, user_id, text):
     if not _oai_client:
         return
     
-    # 將現有角色卡轉為文字描述，提供給LLM作為上下文
-    char_list = [f"Name: {c.name}, Features: {c.features}" for c in sess["characters"].values()]
-    char_context = "Existing characters: " + "; ".join(char_list) if char_list else ""
-    
     sysmsg = f"""
     你是一個故事角色分析機器人。你的任務是從用戶的句子中識別新的角色或現有角色的新特徵。
     
     分析步驟：
     1. 識別句子中是否提到了**明確的角色名稱**（例如：小明、小狗、一隻貓）。名稱可以是人名、動物名或任何具體稱謂。
-    2. 如果是新的角色名稱，請為它建立一個新角色。
-    3. 提取與該角色相關的**外觀特徵**（如：髮色、髮型、衣服顏色、穿著、配件等）和**物種**（例如：男孩、女孩、狗、貓、機器人）。
-    4. 請將分析結果以 JSON 格式輸出，不要有任何額外的文字或解釋。
-    5. JSON 格式必須是：`{{ "name": "角色名稱", "features": {{ "feature_key": "feature_value", ... }} }}`。
+    2. 提取與該角色相關的**外觀特徵**（如：髮色、髮型、衣服顏色、穿著、配件等）和**物種**（例如：男孩、女孩、狗、貓、機器人）。
+    3. 請將分析結果以**JSON 列表**格式輸出，不要有任何額外的文字或解釋。列表中每個元素代表一個角色。
+    4. 每個 JSON 物件必須包含 `name` 和 `features` 欄位。
        - `name` 欄位必須是從句子中提取的具體名稱。
        - `features` 字典中的 key 應為英文，value 為英文或簡潔中文。
-       - 例如：`{{ "name": "小明", "features": {{ "species": "boy", "hair_color": "black", "top_type": "T-shirt", "top_color": "blue" }} }}`。
+       - 範例：`[{{ "name": "小明", "features": {{ "species": "boy", "hair_color": "black" }} }}, {{ "name": "可可", "features": {{ "species": "fox", "color": "white" }} }}]`。
     
     用戶輸入：{text}
     """
@@ -326,27 +321,33 @@ def maybe_update_character_card(sess, user_id, text):
         # 嘗試解析 JSON
         try:
             json_data = json.loads(result_text)
-            char_name = json_data.get("name")
-            features = json_data.get("features", {})
             
-            if not char_name:
-                log.info("❌ LLM failed to extract a name.")
-                return
+            if not isinstance(json_data, list):
+                # 如果不是列表，把它包裝成列表以便統一處理
+                json_data = [json_data]
             
-            # 檢查是否已存在該角色
-            if char_name in sess["characters"]:
-                char_card = sess["characters"][char_name]
-                for key, value in features.items():
-                    if char_card.update(key, value):
-                        log.info(f"🧬 [LLM] Updated character card | user={user_id} | name={char_name} | key={key} | value={value}")
-            else:
-                # 建立新角色卡
-                new_char_card = CharacterCard(name=char_name)
-                for key, value in features.items():
-                    new_char_card.update(key, value)
-                sess["characters"][char_name] = new_char_card
-                log.info(f"✨ [LLM] New character created | user={user_id} | name={char_name} | features={json.dumps(new_char_card.features, ensure_ascii=False)}")
+            for char_obj in json_data:
+                char_name = char_obj.get("name")
+                features = char_obj.get("features", {})
                 
+                if not char_name:
+                    log.warning("❌ LLM output did not contain a name in a character object.")
+                    continue
+                
+                # 檢查是否已存在該角色
+                if char_name in sess["characters"]:
+                    char_card = sess["characters"][char_name]
+                    for key, value in features.items():
+                        if char_card.update(key, value):
+                            log.info(f"🧬 [LLM] Updated character card | user={user_id} | name={char_name} | key={key} | value={value}")
+                else:
+                    # 建立新角色卡
+                    new_char_card = CharacterCard(name=char_name)
+                    for key, value in features.items():
+                        new_char_card.update(key, value)
+                    sess["characters"][char_name] = new_char_card
+                    log.info(f"✨ [LLM] New character created | user={user_id} | name={char_name} | features={json.dumps(new_char_card.features, ensure_ascii=False)}")
+            
             save_current_story(user_id, sess)
 
         except json.JSONDecodeError:
@@ -419,7 +420,7 @@ BASE_STYLE = (
     "a vivid color palette, and high detail. The scene should have "
     "a dreamlike, whimsical atmosphere with soft, subtle lighting. "
     "Keep character design consistent across all images. "
-    "No text, letters, logos, watermarks, signage, or brand names."
+    "No text, letters, logos, watermarks, or brand names."
 )
 
 def build_scene_prompt(scene_desc: str, char_hint: str = "", extra: str = ""):
