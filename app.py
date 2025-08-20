@@ -328,12 +328,12 @@ def _extract_characters_from_text(text: str) -> list:
         "2. **`species`** (string): 判斷角色的物種，例如 'human', 'fox', 'deer' 等。若無法判斷，請用 'unknown'。\n"
         "3. **`gender`** (string): 判斷性別，例如 'male', 'female'。若無法判斷，請用 null。\n"
         "4. **`features`** (object): 找出角色的外觀特徵，例如 'hair_color', 'eye_color', 'top_color' 等。請使用英文描述。\n"
-        "   - 眼睛顏色：'eye_color': 'green'\n"
-        "   - 頭髮顏色：'hair_color': 'brown'\n"
-        "   - 頭髮樣式：'hair_style': 'straight hair'\n"
-        "   - 上衣顏色：'top_color': 'red'\n"
-        "   - 帽子：'accessory_hat': true\n"
-        "   - 若無該特徵，請不要在 features 中包含該鍵值。\n"
+        "   - 眼睛顏色：'eye_color': 'green'\n"
+        "   - 頭髮顏色：'hair_color': 'brown'\n"
+        "   - 頭髮樣式：'hair_style': 'straight hair'\n"
+        "   - 上衣顏色：'top_color': 'red'\n"
+        "   - 帽子：'accessory_hat': true\n"
+        "   - 若無該特徵，請不要在 features 中包含該鍵值。\n"
         "**請以一個 JSON 陣列的形式輸出，不要有任何多餘的文字或解釋，只需 JSON 本身。**\n"
         "例如：\n"
         "[{\"name\": \"安琪\", \"species\": \"human\", \"gender\": \"female\", \"features\": {\"hair_color\": \"brown\", \"eye_color\": \"green\"}}, {\"name\": \"可可\", \"species\": \"fox\", \"gender\": null, \"features\": {\"color\": \"white\"}}]"
@@ -591,18 +591,27 @@ def handle_message(event):
         sess["messages"] = sess["messages"][-60:]
     save_chat(user_id, "user", text)
 
-    maybe_update_character_card(sess, user_id, text)
+    # 將耗時的角色卡更新任務放入背景執行緒
+    # 這樣主程式就不會被阻擋，可以立刻處理後續的邏輯或回覆
+    threading.Thread(target=maybe_update_character_card, args=(sess, user_id, text), daemon=True).start()
 
     # 2. 處理「整理」指令
     if re.search(r"(整理|總結|summary)", text):
-        compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
-        summary = generate_story_summary(compact) or "1.\n2.\n3.\n4.\n5."
-        paras = extract_paragraphs(summary)
-        sess["paras"] = paras
-        sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
-        save_current_story(user_id, sess)
-        line_bot_api.reply_message(reply_token, TextSendMessage("✨ 故事總結完成！這就是我們目前的故事：\n" + summary))
-        save_chat(user_id, "assistant", summary)
+        # 立即回覆「處理中」訊息
+        line_bot_api.reply_message(reply_token, TextSendMessage("✨ 正在為你總結故事，請稍候一下喔！"))
+        
+        # 在背景執行緒中執行耗時的總結操作
+        def _summarize_and_push():
+            compact = [{"role": "user", "content": "\n".join([m["content"] for m in sess["messages"] if m["role"] == "user"][-8:])}]
+            summary = generate_story_summary(compact) or "1.\n2.\n3.\n4.\n5."
+            paras = extract_paragraphs(summary)
+            sess["paras"] = paras
+            sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
+            save_current_story(user_id, sess)
+            line_bot_api.push_message(user_id, TextSendMessage("✨ 故事總結完成！這就是我們目前的故事：\n" + summary))
+            save_chat(user_id, "assistant", summary)
+        
+        threading.Thread(target=_summarize_and_push, daemon=True).start()
         return
 
     # 3. 處理「畫圖」指令
@@ -615,7 +624,7 @@ def handle_message(event):
         
         # 檢查故事內容是否存在
         if not sess.get("paras"):
-            line_bot_api.reply_message(reply_token, TextSendMessage("請先說一個故事或用「整理目前的故事」指令來總結內容，我才能開始畫喔！"))
+            line_bot_api.reply_message(reply_token, TextSendMessage("請先說一個故事或用「整理」指令來總結內容，我才能開始畫喔！"))
             return
 
         line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！第 {idx+1} 段的插圖開始生成，請稍候一下下喔～"))
