@@ -179,47 +179,55 @@ class CharacterCard:
         parts = []
         
         # 處理名稱與角色種類
-        if self.name and "species" in self.features:
+        if self.name and "species" in self.features and self.features["species"] is not None:
             parts.append(f"a {self.features['species']} named {self.name}")
         elif self.name:
             parts.append(f"{self.name}")
         
         # 處理性別
-        if "gender" in self.features:
-            if self.features["gender"] == "男":
+        gender = self.features.get("gender")
+        if gender:
+            if gender == "男":
                 parts.append("a boy")
-            elif self.features["gender"] == "女":
+            elif gender == "女":
                 parts.append("a girl")
                 
         # 處理外觀特徵
-        if "hair_color" in self.features or "hair_style" in self.features:
+        hair_color = self.features.get("hair_color")
+        hair_style = self.features.get("hair_style")
+        if hair_color or hair_style:
             hair_desc = ""
-            if "hair_color" in self.features:
-                hair_desc += self.features["hair_color"] + " "
-            if "hair_style" in self.features:
-                hair_desc += self.features["hair_style"]
-            if hair_desc:
-                parts.append(f"with {hair_desc.strip()} hair")
+            if hair_color:
+                hair_desc += hair_color + " "
+            if hair_style:
+                hair_desc += hair_style
+            parts.append(f"with {hair_desc.strip()} hair")
         
         # 處理服裝
-        if "top_color" in self.features and "top_type" in self.features:
-            parts.append(f"wears a {self.features['top_color']} {self.features['top_type']}")
-        elif "top_color" in self.features:
-            parts.append(f"wears a {self.features['top_color']} top")
-        if "bottom_color" in self.features and "bottom_type" in self.features:
-            parts.append(f"wears {self.features['bottom_color']} {self.features['bottom_type']}")
-        elif "bottom_color" in self.features:
-            parts.append(f"wears {self.features['bottom_color']} bottoms")
+        top_color = self.features.get("top_color")
+        top_type = self.features.get("top_type")
+        if top_color and top_type:
+            parts.append(f"wears a {top_color} {top_type}")
+        elif top_color:
+            parts.append(f"wears a {top_color} top")
+            
+        bottom_color = self.features.get("bottom_color")
+        bottom_type = self.features.get("bottom_type")
+        if bottom_color and bottom_type:
+            parts.append(f"wears {bottom_color} {bottom_type}")
+        elif bottom_color:
+            parts.append(f"wears {bottom_color} bottoms")
 
         # 處理配件
-        if "accessory_glasses" in self.features and self.features["accessory_glasses"]:
+        if self.features.get("accessory_glasses"):
             parts.append("wears glasses")
-        if "accessory_hat" in self.features and self.features["accessory_hat"]:
+        if self.features.get("accessory_hat"):
             parts.append("wears a hat")
         
         # 其他特徵
-        if "extra_features" in self.features:
-            parts.append(self.features["extra_features"])
+        extra_features = self.features.get("extra_features")
+        if extra_features:
+            parts.append(extra_features)
         
         return ", ".join(parts)
 
