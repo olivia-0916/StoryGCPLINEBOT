@@ -531,7 +531,6 @@ def handle_message(event):
     # 1. 處理特殊指令和打招呼
     is_greeting = bool(re.search(r"(hi|Hi|你好|您好|哈囉)", text, re.IGNORECASE))
     is_new_story = bool(re.search(r"一起來講故事|我們來講個故事|開始說故事|說個故事|來點故事|我想寫故事", text))
-    is_image_request = bool(re.search(r"(畫|請畫|幫我畫)第([一二三四五12345])段", text))
     is_summary_request = bool(re.search(r"(整理|總結|summary)", text))
 
     if is_greeting:
@@ -562,11 +561,22 @@ def handle_message(event):
         return
 
     # 3. 處理「畫圖」指令
-    m = re.search(r"(畫|請畫|幫我畫)第([一二三四五12345])段", text)
-    if m:
+    # 首先檢查是否為不指定段落的單純畫圖指令
+    # 新增: 處理一般畫圖指令
+    m_general_draw = re.search(r"^(畫|請畫|幫我畫)(.*)", text)
+    if m_general_draw:
+        prompt_text = m_general_draw.group(2).strip(" ，,。.!！")
+        if prompt_text:
+            line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！小繪正在為你畫「{prompt_text}」，請稍候一下下喔～"))
+            threading.Thread(target=_draw_single_image_and_push, args=(user_id, prompt_text), daemon=True).start()
+            return
+        
+    # 接著檢查是否為指定段落的畫圖指令
+    m_paragraph_draw = re.search(r"(畫|請畫|幫我畫)第([一二三四五12345])段", text)
+    if m_paragraph_draw:
         n_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
                  '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
-        idx = n_map[m.group(2)] - 1
+        idx = n_map[m_paragraph_draw.group(2)] - 1
         extra = re.sub(r"(畫|請畫|幫我畫)第[一二三四五12345]段", "", text).strip(" ，,。.!！")
     
         # 檢查故事內容是否存在
@@ -579,7 +589,7 @@ def handle_message(event):
         return
 
     # 4. 如果沒有特殊指令，處理一般對話，交由 AI 模型來生成引導
-    if not is_greeting and not is_image_request and not is_summary_request:
+    if not is_greeting:
         guiding_response = generate_guiding_response(sess["messages"])
         line_bot_api.reply_message(reply_token, TextSendMessage(guiding_response))
         save_chat(user_id, "assistant", guiding_response)
@@ -678,6 +688,43 @@ def _draw_and_push(user_id, idx, extra):
             line_bot_api.push_message(user_id, TextSendMessage("生成中遇到小狀況，等等再試一次可以嗎？"))
         except Exception:
             pass
+
+# 新增這個函數來處理不指定段落的單純畫圖請求
+def _draw_single_image_and_push(user_id, prompt_text):
+    try:
+        log.info("🎯 [bg] single image request | user=%s | prompt=%s", user_id, prompt_text)
+        
+        # 使用者只提供一個簡單的畫圖指令，可以直接用作提示詞
+        prompt = f"{BASE_STYLE}, {prompt_text}"
+        
+        size = _normalize_size(IMAGE_SIZE_ENV)
+        img_bytes = openai_images_generate(prompt, size=size)
+        
+        if not img_bytes:
+            line_bot_api.push_message(user_id, TextSendMessage("圖片生成暫時失敗了，稍後再試一次可以嗎？"))
+            return
+
+        fname = f"line_images/{user_id}-{uuid.uuid4().hex[:6]}_single.png"
+        public_url = gcs_upload_bytes(img_bytes, fname, "image/png")
+        if not public_url:
+            line_bot_api.push_message(user_id, TextSendMessage("上傳圖片時出了點狀況，等等再請我重畫一次～"))
+            return
+
+        msgs = [
+            TextSendMessage(f"這張插圖送給你！"),
+            ImageSendMessage(public_url, public_url),
+        ]
+        line_bot_api.push_message(user_id, msgs)
+        log.info("✅ [bg] push single image sent | user=%s | url=%s", user_id, public_url)
+        save_chat(user_id, "assistant", f"[image]{public_url}")
+
+    except Exception as e:
+        log.exception("💥 [bg] draw single image fail: %s", e)
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage("生成中遇到小狀況，等等再試一次可以嗎？"))
+        except Exception:
+            pass
+
 
 # =============== 啟動 ===============
 if __name__ == "__main__":
