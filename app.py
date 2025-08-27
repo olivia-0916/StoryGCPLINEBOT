@@ -757,7 +757,7 @@ def _generate_title_and_push(user_id):
         sess["story_title"] = story_title
         save_current_story(user_id, sess)
         
-        line_bot_api.push_message(user_id, TextSendMessage(f"小繪為你的故事取了一個標題：\n【{story_title}】"))
+        line_bot_api.push_message(user_id, TextSendMessage(f"故事標題：【{story_title}】"))
         save_chat(user_id, "assistant", f"故事標題：{story_title}")
 
     except Exception as e:
