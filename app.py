@@ -397,7 +397,8 @@ def render_character_card_as_text(characters: dict) -> str:
 def _extract_characters_from_text(text: str, all_characters: dict) -> list:
     found_chars = []
     for name in all_characters.keys():
-        if name in text:
+        # 使用模糊匹配來處理「小明的」這類情況
+        if name in text or f"{name}的" in text:
             found_chars.append(name)
     return found_chars
 
@@ -614,8 +615,8 @@ def handle_message(event):
     is_greeting = bool(re.search(r"(hi|Hi|你好|您好|哈囉)", text, re.IGNORECASE))
     is_new_story = bool(re.search(r"一起來講故事|我們來講個故事|開始說故事|說個故事|來點故事|我想寫故事", text))
     is_summary_request = bool(re.search(r"(整理|總結|summary)", text))
-    is_title_request = bool(re.search(r"(取標題|故事標題|給標題)", text)) # 新增標題請求偵測
-    is_cover_request = bool(re.search(r"(畫封面|故事封面)", text)) # 新增封面請求偵測
+    is_title_request = bool(re.search(r"(取標題|故事標題|給標題)", text))
+    is_cover_request = bool(re.search(r"(畫封面|故事封面)", text))
 
     if is_greeting:
         line_bot_api.reply_message(reply_token, TextSendMessage("嗨！我是小繪機器人，一個喜歡聽故事並將它畫成插圖的夥伴！很開心認識你！"))
@@ -663,9 +664,27 @@ def handle_message(event):
         line_bot_api.reply_message(reply_token, TextSendMessage("正在為你的故事畫封面，請稍候一下下喔！"))
         threading.Thread(target=_draw_cover_image_and_push, args=(user_id,), daemon=True).start()
         return
+    
+    # 3. 處理「畫圖」指令 (關鍵修正部分)
+    # 優先檢查是否為指定段落的畫圖指令
+    m_paragraph_draw = re.search(r"(畫|請畫|幫我畫)(第[一二三四五12345]段)", text)
+    if m_paragraph_draw:
+        prompt_text = m_paragraph_draw.group(2)
+        n_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                 '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
+        idx = n_map[re.sub(r"第(.)段", r"\1", prompt_text)] - 1
+        extra = re.sub(r"(畫|請畫|幫我畫)第[一二三四五12345]段", "", text).strip(" ，,。.!！")
+    
+        # 檢查故事內容是否存在
+        if not sess.get("paras") or idx >= len(sess["paras"]):
+            line_bot_api.reply_message(reply_token, TextSendMessage("我需要再多一點故事內容，才能開始畫喔！請用「整理故事」指令來總結。"))
+            return
 
-    # 3. 處理「畫圖」指令
-    # 首先檢查是否為不指定段落的單純畫圖指令
+        line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！第 {idx+1} 段的插圖開始生成，請稍候一下下喔～"))
+        threading.Thread(target=_draw_and_push, args=(user_id, idx, extra), daemon=True).start()
+        return
+
+    # 如果不是指定段落的，再檢查是否為不指定段落的單純畫圖指令
     m_general_draw = re.search(r"^(畫|請畫|幫我畫)(.*)", text)
     if m_general_draw:
         prompt_text = m_general_draw.group(2).strip(" ，,。.!！")
@@ -673,24 +692,7 @@ def handle_message(event):
             line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！小繪正在為你畫「{prompt_text}」，請稍候一下下喔～"))
             threading.Thread(target=_draw_single_image_and_push, args=(user_id, prompt_text), daemon=True).start()
             return
-        
-    # 接著檢查是否為指定段落的畫圖指令
-    m_paragraph_draw = re.search(r"(畫|請畫|幫我畫)第([一二三四五12345])段", text)
-    if m_paragraph_draw:
-        n_map = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
-                 '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
-        idx = n_map[m_paragraph_draw.group(2)] - 1
-        extra = re.sub(r"(畫|請畫|幫我畫)第[一二三四五12345]段", "", text).strip(" ，,。.!！")
     
-        # 檢查故事內容是否存在
-        if not sess.get("paras"):
-            line_bot_api.reply_message(reply_token, TextSendMessage("請先說一個故事或用「整理目前的故事」指令來總結內容，我才能開始畫喔！"))
-            return
-
-        line_bot_api.reply_message(reply_token, TextSendMessage(f"收到！第 {idx+1} 段的插圖開始生成，請稍候一下下喔～"))
-        threading.Thread(target=_draw_and_push, args=(user_id, idx, extra), daemon=True).start()
-        return
-
     # 4. 如果沒有特殊指令，處理一般對話，交由 AI 模型來生成引導
     if not is_greeting: # 如果不是打招呼，才發送引導訊息
         guiding_response = generate_guiding_response(sess["messages"])
@@ -731,7 +733,7 @@ def _summarize_and_push(user_id):
         
         # 判斷是否所有五段都已存在，如果是則提示畫封面
         if len(sess["paras"]) == 5:
-            msgs.append(TextSendMessage("故事已經全部完成囉！"))
+            msgs.append(TextSendMessage("故事已經全部完成囉！要不要讓小繪為故事畫一個封面呢？"))
 
         line_bot_api.push_message(user_id, msgs)
         save_chat(user_id, "assistant", "故事總結：\n" + summary)
@@ -864,59 +866,55 @@ def _draw_single_image_and_push(user_id, prompt_text):
         except Exception:
             pass
 
-# 新增：畫故事封面
 def _draw_cover_image_and_push(user_id):
     try:
         sess = _ensure_session(user_id)
         load_current_story(user_id, sess)
-        log.info("🎯 [bg] draw cover image request | user=%s | story_id=%s", user_id, sess.get("story_id"))
-
+        log.info("🎯 [bg] cover image request | user=%s | story_id=%s", user_id, sess.get("story_id"))
+        
         paras = sess.get("paras") or []
-        if not paras:
-            line_bot_api.push_message(user_id, TextSendMessage("目前沒有故事內容，無法繪製封面喔。請先說故事或整理內容。"))
-            return
+        story_title = sess.get("story_title") or "奇妙的故事"
 
-        # 生成封面描述
-        cover_description = _generate_cover_description(paras, sess["characters"])
+        if not paras:
+            line_bot_api.push_message(user_id, TextSendMessage("沒有故事內容可以畫封面喔，請先說一個故事或整理內容。"))
+            return
+            
+        cover_desc = _generate_cover_description(paras, sess.get("characters", {}))
         
-        # 綜合角色卡提示
-        char_hint = render_character_card_as_text(sess["characters"])
-        
-        prompt = build_scene_prompt(scene_desc=cover_description, char_hint=char_hint, extra="storybook cover art, captivating, epic feel")
+        # 封面提示詞加入標題和角色資訊
+        char_hint = render_character_card_as_text(sess.get("characters", {}))
+        prompt = build_scene_prompt(scene_desc=cover_desc, char_hint=char_hint)
         log.info("🧩 [bg] cover prompt head: %s", prompt[:200])
 
-        size = _normalize_size(IMAGE_SIZE_ENV) # 封面也可以用預設尺寸
+        size = _normalize_size(IMAGE_SIZE_ENV)
         img_bytes = openai_images_generate(prompt, size=size)
         
         if not img_bytes:
-            line_bot_api.push_message(user_id, TextSendMessage("封面圖片生成暫時失敗了，稍後再試一次可以嗎？"))
+            line_bot_api.push_message(user_id, TextSendMessage("圖片生成暫時失敗了，稍後再試一次可以嗎？"))
             return
 
-        fname = f"line_images/{user_id}-{uuid.uuid4().hex[:6]}_cover.png"
+        fname = f"line_images/{user_id}-{sess.get('story_id')}-cover.png"
         public_url = gcs_upload_bytes(img_bytes, fname, "image/png")
         if not public_url:
-            line_bot_api.push_message(user_id, TextSendMessage("上傳封面圖片時出了點狀況，等等再請我重畫一次～"))
+            line_bot_api.push_message(user_id, TextSendMessage("上傳圖片時出了點狀況，等等再請我重畫一次～"))
             return
-        
-        story_title = sess.get("story_title", "未命名故事")
+            
         msgs = [
-            TextSendMessage(f"故事【{story_title}】的封面圖完成了！"),
-            ImageSendMessage(public_url, public_url),
-            TextSendMessage("希望你喜歡這個故事的封面！還有其他想畫的嗎？")
+            TextSendMessage(f"【{story_title}】的封面完成了！🎉"),
+            ImageSendMessage(public_url, public_url)
         ]
+        
         line_bot_api.push_message(user_id, msgs)
         log.info("✅ [bg] push cover image sent | user=%s | url=%s", user_id, public_url)
-        save_chat(user_id, "assistant", f"[cover_image]{public_url}")
+        save_chat(user_id, "assistant", f"[cover image]{public_url}")
 
     except Exception as e:
         log.exception("💥 [bg] draw cover image fail: %s", e)
         try:
-            line_bot_api.push_message(user_id, TextSendMessage("繪製封面時遇到小狀況，等等再試一次可以嗎？"))
+            line_bot_api.push_message(user_id, TextSendMessage("生成封面時遇到小狀況，等等再試一次可以嗎？"))
         except Exception:
             pass
 
-
-# =============== 啟動 ===============
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    
