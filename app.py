@@ -303,16 +303,18 @@ def maybe_update_character_card(sess, user_id, text):
     
     sysmsg = f"""
     你是一個故事角色分析機器人。你的任務是從用戶的句子中識別新的角色或現有角色的新特徵。
+    重要提示：請特別注意分析角色的外觀，包含服裝和配件。
     
     分析步驟：
     1. 識別句子中是否提到了**明確的角色名稱**（例如：小明、小狗、一隻貓）。名稱可以是人名、動物名或任何具體稱謂。
     2. 提取與該角色相關的**外觀特徵**（如：髮色、髮型、衣服顏色、穿著、配件等）和**物種**（例如：男孩、女孩、狗、貓、機器人）。
-    3. 請將分析結果以**JSON 列表**格式輸出，不要有任何額外的文字或解釋。列表中每個元素代表一個角色。
-    4. 每個 JSON 物件必須包含 `name` 和 `features` 欄位。
+    3. **服裝請盡可能拆解為「顏色」和「種類」兩個部分。例如，「白色的長裙」應識別為 `top_color: "white"` 和 `top_type: "long dress"`。如果沒有明確的上下身區分，可以使用 `clothing_color` 和 `clothing_type`。**
+    4. 請將分析結果以**JSON 列表**格式輸出，不要有任何額外的文字或解釋。
+    5. 每個 JSON 物件必須包含 `name` 和 `features` 欄位。
       - `name` 欄位必須是從句子中提取的具體名稱。
       - `features` 字典中的 key 應為英文，value 為英文或簡潔中文。
-      - 範例：`[{{ "name": "小明", "features": {{ "species": "boy", "hair_color": "black" }} }}, {{ "name": "可可", "features": {{ "species": "fox", "color": "white" }} }}]`。
-    
+      - 範例：`[{{ "name": "小明", "features": {{ "species": "boy", "hair_color": "black", "clothing_color": "blue", "clothing_type": "T-shirt" }} }}, {{ "name": "可可", "features": {{ "species": "fox", "color": "white" }} }}]`。
+
     用戶輸入：{text}
     """
     
