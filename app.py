@@ -731,7 +731,7 @@ def _summarize_and_push(user_id):
         
         # 判斷是否所有五段都已存在，如果是則提示畫封面
         if len(sess["paras"]) == 5:
-            msgs.append(TextSendMessage("故事已經全部完成囉！要不要讓小繪為故事畫一個封面呢？"))
+            msgs.append(TextSendMessage("故事已經全部完成囉！"))
 
         line_bot_api.push_message(user_id, msgs)
         save_chat(user_id, "assistant", "故事總結：\n" + summary)
