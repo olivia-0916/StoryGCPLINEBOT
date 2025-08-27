@@ -900,7 +900,7 @@ def _draw_cover_image_and_push(user_id):
             return
             
         msgs = [
-            TextSendMessage(f"【{story_title}】的封面完成了！🎉"),
+            TextSendMessage(f"封面完成了！🎉"),
             ImageSendMessage(public_url, public_url)
         ]
         
