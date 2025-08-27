@@ -243,7 +243,7 @@ user_sessions = {}
 user_seeds    = {}
 
 def _ensure_session(user_id):
-    sess = user_sessions.setdefault(user_id, {"messages": [], "paras": [], "characters": {}, "story_id": None})
+    sess = user_sessions.setdefault(user_id, {"messages": [], "paras": [], "characters": {}, "story_id": None, "story_title": None})
     user_seeds.setdefault(user_id, random.randint(100000, 999999))
     if sess.get("story_id") is None:
         sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
@@ -268,6 +268,7 @@ def save_current_story(user_id, sess):
             "story_id": sess.get("story_id"),
             "paragraphs": sess.get("paras", []),
             "characters": char_data,
+            "story_title": sess.get("story_title"), # 保存故事標題
             "updated_at": firestore.SERVER_TIMESTAMP
         }
         db.collection("users").document(user_id).collection("story").document("current").set(doc)
@@ -282,6 +283,7 @@ def load_current_story(user_id, sess):
             d = doc.to_dict() or {}
             sess["story_id"] = d.get("story_id") or sess.get("story_id")
             sess["paras"] = d.get("paragraphs") or sess.get("paras", [])
+            sess["story_title"] = d.get("story_title") or sess.get("story_title") # 載入故事標題
             
             loaded_chars = d.get("characters", {})
             for name, char_dict in loaded_chars.items():
@@ -436,6 +438,86 @@ def extract_paragraphs(summary):
     lines = [re.sub(r"^\d+\.?\s*", "", x.strip()) for x in summary.split("\n") if x.strip()]
     return lines[:5]
 
+# 新增：生成故事標題
+def _generate_story_title(paragraphs: list, characters: dict) -> str:
+    if not paragraphs:
+        return "未命名故事"
+
+    full_story = "\n".join(paragraphs)
+    char_names = ", ".join(characters.keys()) if characters else "主角"
+
+    sysmsg = (
+        f"根據以下故事內容和角色，請為故事想一個簡短、吸引人的標題，不要超過 15 個字。\n"
+        f"故事內容：{full_story}\n"
+        f"主要角色：{char_names}\n"
+        f"請直接輸出標題，不要有任何額外文字。"
+    )
+    
+    try:
+        if _openai_mode == "sdk1":
+            resp = _oai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": sysmsg}],
+                temperature=0.7,
+                max_tokens=30 # 標題不會太長
+            )
+            title = resp.choices[0].message.content.strip()
+        else:
+            resp = _oai_client.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": sysmsg}],
+                temperature=0.7,
+                max_tokens=30
+            )
+            title = resp["choices"][0]["message"]["content"].strip()
+        
+        # 簡單清理標題，移除可能的引號或其他符號
+        title = re.sub(r"^['\"「『【（〔〖《＜＜", "", title)
+        title = re.sub(r"['\"」』】）〕〗》＞＞]$", "", title)
+        return title or "奇妙的故事"
+
+    except Exception as e:
+        log.error("❌ OpenAI title generation error: %s", e)
+        return "奇妙的故事"
+
+# 新增：生成封面描述
+def _generate_cover_description(paragraphs: list, characters: dict) -> str:
+    if not paragraphs:
+        return "一個充滿想像力的故事，有著迷人的角色。"
+
+    full_story = "\n".join(paragraphs)
+    char_prompts = render_character_card_as_text(characters)
+
+    sysmsg = (
+        f"根據以下故事的五段內容和角色，想像一個豐富、引人入勝的故事封面，並用一句話簡潔地描述這個場景。\n"
+        f"這個描述將作為繪圖的提示，所以要包含故事的主要元素、場景和角色（請提到具體角色，而非籠統的「他們」）。\n"
+        f"故事內容：{full_story}\n"
+        f"角色特徵：{char_prompts}\n"
+        f"請直接輸出場景描述，不要有任何額外文字。"
+    )
+    
+    try:
+        if _openai_mode == "sdk1":
+            resp = _oai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": sysmsg}],
+                temperature=0.7,
+                max_tokens=100
+            )
+            return resp.choices[0].message.content.strip()
+        else:
+            resp = _oai_client.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": sysmsg}],
+                temperature=0.7,
+                max_tokens=100
+            )
+            return resp["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        log.error("❌ OpenAI cover description generation error: %s", e)
+        return "一個充滿想像力的故事封面，有著迷人的角色。"
+
+
 # =============== 圖像 Prompt ===============
 # 🎨 畫風回歸到最初的設定，避免風格跑掉
 BASE_STYLE = (
@@ -532,13 +614,15 @@ def handle_message(event):
     is_greeting = bool(re.search(r"(hi|Hi|你好|您好|哈囉)", text, re.IGNORECASE))
     is_new_story = bool(re.search(r"一起來講故事|我們來講個故事|開始說故事|說個故事|來點故事|我想寫故事", text))
     is_summary_request = bool(re.search(r"(整理|總結|summary)", text))
+    is_title_request = bool(re.search(r"(取標題|故事標題|給標題)", text)) # 新增標題請求偵測
+    is_cover_request = bool(re.search(r"(畫封面|故事封面)", text)) # 新增封面請求偵測
 
     if is_greeting:
         line_bot_api.reply_message(reply_token, TextSendMessage("嗨！我是小繪機器人，一個喜歡聽故事並將它畫成插圖的夥伴！很開心認識你！"))
         # 這裡不加 return，讓它繼續執行後續邏輯
     
     if is_new_story:
-        user_sessions[user_id] = {"messages": [], "paras": [], "characters": {}, "story_id": None}
+        user_sessions[user_id] = {"messages": [], "paras": [], "characters": {}, "story_id": None, "story_title": None}
         _ensure_session(user_id) # 重新初始化 session
         line_bot_api.reply_message(reply_token, TextSendMessage("太棒了！小繪已經準備好了。我們來創造一個全新的故事吧！故事的主角是誰呢？"))
         return
@@ -560,9 +644,28 @@ def handle_message(event):
         threading.Thread(target=_summarize_and_push, args=(user_id,), daemon=True).start()
         return
 
+    # 2.5 處理「取標題」指令
+    if is_title_request:
+        if not sess.get("paras"):
+            line_bot_api.reply_message(reply_token, TextSendMessage("請先說一個故事或用「整理目前的故事」指令來總結內容，我才能為故事取標題喔！"))
+            return
+        
+        line_bot_api.reply_message(reply_token, TextSendMessage("正在為你的故事想一個好聽的標題，請稍候一下下喔！"))
+        threading.Thread(target=_generate_title_and_push, args=(user_id,), daemon=True).start()
+        return
+
+    # 2.7 處理「畫封面」指令
+    if is_cover_request:
+        if not sess.get("paras"):
+            line_bot_api.reply_message(reply_token, TextSendMessage("請先說一個故事或用「整理目前的故事」指令來總結內容，我才能為故事畫封面喔！"))
+            return
+        
+        line_bot_api.reply_message(reply_token, TextSendMessage("正在為你的故事畫封面，請稍候一下下喔！"))
+        threading.Thread(target=_draw_cover_image_and_push, args=(user_id,), daemon=True).start()
+        return
+
     # 3. 處理「畫圖」指令
     # 首先檢查是否為不指定段落的單純畫圖指令
-    # 新增: 處理一般畫圖指令
     m_general_draw = re.search(r"^(畫|請畫|幫我畫)(.*)", text)
     if m_general_draw:
         prompt_text = m_general_draw.group(2).strip(" ，,。.!！")
@@ -589,7 +692,7 @@ def handle_message(event):
         return
 
     # 4. 如果沒有特殊指令，處理一般對話，交由 AI 模型來生成引導
-    if not is_greeting:
+    if not is_greeting: # 如果不是打招呼，才發送引導訊息
         guiding_response = generate_guiding_response(sess["messages"])
         line_bot_api.reply_message(reply_token, TextSendMessage(guiding_response))
         save_chat(user_id, "assistant", guiding_response)
@@ -617,16 +720,51 @@ def _summarize_and_push(user_id):
         
         sess["paras"] = paras
         sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
+        
+        # 生成故事標題
+        story_title = _generate_story_title(paras, sess["characters"])
+        sess["story_title"] = story_title
+
         save_current_story(user_id, sess)
         
-        line_bot_api.push_message(user_id, TextSendMessage("✨ 故事總結完成！這就是我們目前的故事：\n" + summary))
-        save_chat(user_id, "assistant", summary)
+        msgs = [TextSendMessage(f"✨ 故事總結完成！這就是我們目前的故事：\n【{story_title}】\n" + summary)]
+        
+        # 判斷是否所有五段都已存在，如果是則提示畫封面
+        if len(sess["paras"]) == 5:
+            msgs.append(TextSendMessage("故事已經全部完成囉！要不要讓小繪為故事畫一個封面呢？"))
+
+        line_bot_api.push_message(user_id, msgs)
+        save_chat(user_id, "assistant", "故事總結：\n" + summary)
     except Exception as e:
         log.exception("💥 [bg] summarize fail: %s", e)
         try:
             line_bot_api.push_message(user_id, TextSendMessage("整理故事時遇到小狀況，等等再試一次可以嗎？"))
         except Exception:
             pass
+
+def _generate_title_and_push(user_id):
+    try:
+        sess = _ensure_session(user_id)
+        load_current_story(user_id, sess)
+
+        if not sess.get("paras"):
+            line_bot_api.push_message(user_id, TextSendMessage("目前沒有故事內容可以取標題喔，請先說一個故事或整理內容。"))
+            return
+
+        story_title = _generate_story_title(sess["paras"], sess["characters"])
+        sess["story_title"] = story_title
+        save_current_story(user_id, sess)
+        
+        line_bot_api.push_message(user_id, TextSendMessage(f"小繪為你的故事取了一個標題：\n【{story_title}】"))
+        save_chat(user_id, "assistant", f"故事標題：{story_title}")
+
+    except Exception as e:
+        log.exception("💥 [bg] generate title fail: %s", e)
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage("取標題時遇到小狀況，等等再試一次可以嗎？"))
+        except Exception:
+            pass
+
 
 def _draw_and_push(user_id, idx, extra):
     try:
@@ -676,6 +814,8 @@ def _draw_and_push(user_id, idx, extra):
         if idx + 1 < len(paras):
             next_scene_preview = paras[idx + 1]
             msgs.append(TextSendMessage(f"要不要繼續畫第 {idx+2} 段內容呢？\n下一段的故事是：\n「{next_scene_preview}」"))
+        elif idx + 1 == 5: # 如果這是最後一段
+            msgs.append(TextSendMessage("太棒了，五段故事圖都畫好了！要不要讓小繪為故事畫一個封面呢？"))
 
         line_bot_api.push_message(user_id, msgs)
         log.info("✅ [bg] push image sent | user=%s | url=%s", user_id, public_url)
@@ -689,7 +829,6 @@ def _draw_and_push(user_id, idx, extra):
         except Exception:
             pass
 
-# 新增這個函數來處理不指定段落的單純畫圖請求
 def _draw_single_image_and_push(user_id, prompt_text):
     try:
         log.info("🎯 [bg] single image request | user=%s | prompt=%s", user_id, prompt_text)
@@ -722,6 +861,57 @@ def _draw_single_image_and_push(user_id, prompt_text):
         log.exception("💥 [bg] draw single image fail: %s", e)
         try:
             line_bot_api.push_message(user_id, TextSendMessage("生成中遇到小狀況，等等再試一次可以嗎？"))
+        except Exception:
+            pass
+
+# 新增：畫故事封面
+def _draw_cover_image_and_push(user_id):
+    try:
+        sess = _ensure_session(user_id)
+        load_current_story(user_id, sess)
+        log.info("🎯 [bg] draw cover image request | user=%s | story_id=%s", user_id, sess.get("story_id"))
+
+        paras = sess.get("paras") or []
+        if not paras:
+            line_bot_api.push_message(user_id, TextSendMessage("目前沒有故事內容，無法繪製封面喔。請先說故事或整理內容。"))
+            return
+
+        # 生成封面描述
+        cover_description = _generate_cover_description(paras, sess["characters"])
+        
+        # 綜合角色卡提示
+        char_hint = render_character_card_as_text(sess["characters"])
+        
+        prompt = build_scene_prompt(scene_desc=cover_description, char_hint=char_hint, extra="storybook cover art, captivating, epic feel")
+        log.info("🧩 [bg] cover prompt head: %s", prompt[:200])
+
+        size = _normalize_size(IMAGE_SIZE_ENV) # 封面也可以用預設尺寸
+        img_bytes = openai_images_generate(prompt, size=size)
+        
+        if not img_bytes:
+            line_bot_api.push_message(user_id, TextSendMessage("封面圖片生成暫時失敗了，稍後再試一次可以嗎？"))
+            return
+
+        fname = f"line_images/{user_id}-{uuid.uuid4().hex[:6]}_cover.png"
+        public_url = gcs_upload_bytes(img_bytes, fname, "image/png")
+        if not public_url:
+            line_bot_api.push_message(user_id, TextSendMessage("上傳封面圖片時出了點狀況，等等再請我重畫一次～"))
+            return
+        
+        story_title = sess.get("story_title", "未命名故事")
+        msgs = [
+            TextSendMessage(f"故事【{story_title}】的封面圖完成了！"),
+            ImageSendMessage(public_url, public_url),
+            TextSendMessage("希望你喜歡這個故事的封面！還有其他想畫的嗎？")
+        ]
+        line_bot_api.push_message(user_id, msgs)
+        log.info("✅ [bg] push cover image sent | user=%s | url=%s", user_id, public_url)
+        save_chat(user_id, "assistant", f"[cover_image]{public_url}")
+
+    except Exception as e:
+        log.exception("💥 [bg] draw cover image fail: %s", e)
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage("繪製封面時遇到小狀況，等等再試一次可以嗎？"))
         except Exception:
             pass
 
