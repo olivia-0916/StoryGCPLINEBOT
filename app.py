@@ -105,13 +105,13 @@ def _init_openai():
 
 _init_openai()
 
-ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024", , "512x512", "auto"}
 
 def _normalize_size(size: str) -> str:
     size = (size or "").strip()
     if size not in ALLOWED_SIZES:
-        log.warning("⚠️ IMAGE_SIZE=%s not supported; fallback -> 1024x1024", size)
-        return "1024x1024"
+        log.warning("⚠️ IMAGE_SIZE=%s not supported; fallback -> 512x512", size)
+        return "512x512"
     return size
 
 def openai_images_generate(prompt: str, size: str):
