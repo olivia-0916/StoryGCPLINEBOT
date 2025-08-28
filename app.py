@@ -105,7 +105,7 @@ def _init_openai():
 
 _init_openai()
 
-ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024", , "512x512", "auto"}
+ALLOWED_SIZES = {"1024x1024", "1024x1536", "1536x1024", "512x512", "auto"}
 
 def _normalize_size(size: str) -> str:
     size = (size or "").strip()
