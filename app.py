@@ -366,11 +366,17 @@ def maybe_update_character_card(sess, user_id, text):
                         log.info(f"🧬 [LLM] Updated character card | user={user_id} | name={char_name} | key={key} | value={value}")
             else:
                 new_char_card = CharacterCard(name=char_name)
+                # 先設置默認屬性
+                if "species" not in features:
+                    new_char_card.update("species", "human")
+                
+                # 再更新 LLM 提供的特徵
                 for key, value in features.items():
                     new_char_card.update(key, value)
+                
                 sess["characters"][char_name] = new_char_card
                 log.info(f"✨ [LLM] New character created | user={user_id} | name={char_name} | features={json.dumps(new_char_card.features, ensure_ascii=False)}")
-        
+
         save_current_story(user_id, sess)
     
     except Exception as e:
