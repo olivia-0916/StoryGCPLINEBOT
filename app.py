@@ -450,38 +450,84 @@ def _generate_story_title(paragraphs: list, characters: dict) -> str:
     char_names = ", ".join(characters.keys()) if characters else "主角"
 
     sysmsg = (
-        f"根據以下故事內容和角色，請為故事想一個簡短、吸引人的標題，不要超過 15 個字。\n"
+        f"你是一位專業的故事編輯，擅長為故事創作吸引人的標題。\n"
+        f"請根據以下故事內容和主要角色，創作一個獨特、富有創意的故事標題。\n"
+        f"要求：\n"
+        f"1. 標題應該反映故事的核心主題或關鍵情節\n"
+        f"2. 長度控制在 8-15 個中文字\n"
+        f"3. 要有吸引力和獨特性，避免使用「奇妙的故事」等通用詞彙\n"
+        f"4. 可以包含主要角色名稱或關鍵元素\n"
+        f"5. 直接輸出標題，不要有引號或額外說明\n\n"
         f"故事內容：{full_story}\n"
         f"主要角色：{char_names}\n"
-        f"請直接輸出標題，不要有任何額外文字。"
     )
     
     try:
+        log.info("🎯 Generating story title for user with characters: %s", char_names)
+        
         if _openai_mode == "sdk1":
             resp = _oai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "system", "content": sysmsg}],
-                temperature=0.7,
-                max_tokens=30 # 標題不會太長
+                temperature=0.8,  # 提高創意性
+                max_tokens=50,    # 增加token數量確保完整標題
+                top_p=0.9        # 增加多樣性
             )
             title = resp.choices[0].message.content.strip()
         else:
             resp = _oai_client.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "system", "content": sysmsg}],
-                temperature=0.7,
-                max_tokens=30
+                temperature=0.8,
+                max_tokens=50,
+                top_p=0.9
             )
             title = resp["choices"][0]["message"]["content"].strip()
         
-        # 簡單清理標題，移除可能的引號或其他符號
-        title = re.sub(r"^['\"「『【（〔〖《＜＜", "", title)
-        title = re.sub(r"['\"」』】）〕〗》＞＞]$", "", title)
-        return title or "奇妙的故事"
+        # 更強化的標題清理
+        title = re.sub(r"^['\"「『【（〔〖《＜《「『【〖〔（＜＜]+", "", title)
+        title = re.sub(r"['\"」』】）〕〗》＞》」』】〗〕）＞＞]+$", "", title)
+        title = title.replace("《", "").replace("》", "").replace("「", "").replace("」", "")
+        
+        # 如果標題為空或仍然是通用標題，生成基於角色的預設標題
+        if not title or title in ["奇妙的故事", "故事", "一個故事"]:
+            if char_names and char_names != "主角":
+                # 基於角色名稱生成標題
+                main_chars = char_names.split(", ")[:2]  # 取前兩個角色
+                if len(main_chars) == 1:
+                    title = f"{main_chars[0]}的冒險"
+                else:
+                    title = f"{main_chars[0]}與{main_chars[1]}的故事"
+            else:
+                # 基於故事內容關鍵字生成標題
+                import random
+                fallback_titles = [
+                    "神奇的冒險", "意想不到的旅程", "夢幻之旅", 
+                    "奇遇記", "探險時光", "魔法故事",
+                    "童話冒險", "奇幻之旅", "美好時光"
+                ]
+                title = random.choice(fallback_titles)
+        
+        log.info("✅ Generated story title: %s", title)
+        return title
 
     except Exception as e:
         log.error("❌ OpenAI title generation error: %s", e)
-        return "奇妙的故事"
+        
+        # 更智能的錯誤處理 - 基於現有資訊生成標題
+        if char_names and char_names != "主角":
+            main_chars = char_names.split(", ")[:2]
+            if len(main_chars) == 1:
+                return f"{main_chars[0]}的冒險"
+            else:
+                return f"{main_chars[0]}與{main_chars[1]}的故事"
+        else:
+            import random
+            fallback_titles = [
+                "神奇的冒險", "意想不到的旅程", "夢幻之旅", 
+                "奇遇記", "探險時光", "魔法故事"
+            ]
+            return random.choice(fallback_titles)
 
 # 新增：生成封面描述
 def _generate_cover_description(paragraphs: list, characters: dict) -> str:
