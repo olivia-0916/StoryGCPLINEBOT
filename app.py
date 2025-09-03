@@ -306,20 +306,23 @@ def maybe_update_character_card(sess, user_id, text):
     重要提示：請特別注意分析角色的外觀，包含服裝和配件。
     
     分析步驟：
-    1. 識別句子中是否提到了**明確的角色名稱**（例如：小明、小狗、一隻貓）。名稱可以是人名、動物名或任何具體稱謂。
-    2. 提取與該角色相關的**外觀特徵**（如：髮色、髮型、衣服顏色、穿著、配件等）和**物種**（例如：男孩、女孩、狗、貓、機器人）。
-    3. **服裝請盡可能拆解為「顏色」和「種類」兩個部分。例如，「白色的長裙」應識別為 `top_color: "white"` 和 `top_type: "long dress"`。如果沒有明確的上下身區分，可以使用 `clothing_color` 和 `clothing_type`。**
-    4. 請將分析結果以**JSON 列表**格式輸出，不要有任何額外的文字或解釋。
-    5. 每個 JSON 物件必須包含 `name` 和 `features` 欄位。
+    1. 識別句子中是否提到了**明確的角色名稱**（例如：小明、小狗、一隻貓、純純、皮皮等）。名稱可以是人名、動物名或任何具體稱謂。
+    2. 如果用戶使用「主角有：」、「角色有：」等格式列出多個名稱，請將每個名稱都識別為獨立角色。
+    3. 提取與該角色相關的**外觀特徵**（如：髮色、髮型、衣服顏色、穿著、配件等）和**物種**（例如：男孩、女孩、狗、貓、機器人）。
+    4. **服裝請盡可能拆解為「顏色」和「種類」兩個部分。例如，「白色的長裙」應識別為 `top_color: "white"` 和 `top_type: "long dress"`。如果沒有明確的上下身區分，可以使用 `clothing_color` 和 `clothing_type`。**
+    5. 請將分析結果以**純JSON格式**輸出，不要使用markdown代碼塊，不要有任何額外的文字或解釋。
+    6. 每個 JSON 物件必須包含 `name` 和 `features` 欄位。
       - `name` 欄位必須是從句子中提取的具體名稱。
-      - `features` 字典中的 key 應為英文，value 為英文或簡潔中文。
-      - 範例：`[{{ "name": "小明", "features": {{ "species": "boy", "hair_color": "black", "clothing_color": "blue", "clothing_type": "T-shirt" }} }}, {{ "name": "可可", "features": {{ "species": "fox", "color": "white" }} }}]`。
+      - `features` 字典中的 key 應為英文，value 為英文或簡潔中文。如果沒有明確特徵描述，可以設為空字典 {{}}。
+      - 範例：`[{{"name": "小明", "features": {{"species": "boy", "hair_color": "black", "clothing_color": "blue", "clothing_type": "T-shirt"}}}}, {{"name": "可可", "features": {{"species": "fox", "color": "white"}}}}]`
+      - 角色列表範例：`[{{"name": "純純", "features": {{}}}}, {{"name": "皮皮", "features": {{}}}}, {{"name": "璞璞", "features": {{}}}}]`
 
     用戶輸入：{text}
     """
     
     try:
         t0 = time.time()
+        log.info(f"🔍 [LLM] Analyzing characters in text: {text}")
         
         if _openai_mode == "sdk1":
             resp = _oai_client.chat.completions.create(
@@ -335,7 +338,22 @@ def maybe_update_character_card(sess, user_id, text):
                 temperature=0.3,
             )
             result_text = resp["choices"][0]["message"]["content"].strip()
-            
+        
+        log.info(f"🤖 [LLM] Raw response: {result_text}")
+        
+        # 處理可能的markdown格式
+        if "```json" in result_text:
+            # 提取JSON內容
+            json_match = re.search(r"```json\s*(.*?)\s*```", result_text, re.DOTALL)
+            if json_match:
+                result_text = json_match.group(1).strip()
+                log.info(f"📝 [LLM] Extracted JSON from markdown: {result_text}")
+        elif "```" in result_text:
+            # 處理無標記的代碼塊
+            json_match = re.search(r"```\s*(.*?)\s*```", result_text, re.DOTALL)
+            if json_match:
+                result_text = json_match.group(1).strip()
+        
         # 嘗試解析 JSON
         try:
             json_data = json.loads(result_text)
@@ -344,6 +362,7 @@ def maybe_update_character_card(sess, user_id, text):
                 # 如果不是列表，把它包裝成列表以便統一處理
                 json_data = [json_data]
             
+            characters_created = 0
             for char_obj in json_data:
                 char_name = char_obj.get("name")
                 features = char_obj.get("features", {})
@@ -355,26 +374,64 @@ def maybe_update_character_card(sess, user_id, text):
                 # 檢查是否已存在該角色
                 if char_name in sess["characters"]:
                     char_card = sess["characters"][char_name]
+                    updated_features = 0
                     for key, value in features.items():
                         if char_card.update(key, value):
                             log.info(f"🧬 [LLM] Updated character card | user={user_id} | name={char_name} | key={key} | value={value}")
+                            updated_features += 1
+                    if updated_features == 0 and features:
+                        log.info(f"ℹ️ [LLM] Character {char_name} already exists with no new features to update")
                 else:
                     # 建立新角色卡
                     new_char_card = CharacterCard(name=char_name)
                     for key, value in features.items():
                         new_char_card.update(key, value)
                     sess["characters"][char_name] = new_char_card
+                    characters_created += 1
                     log.info(f"✨ [LLM] New character created | user={user_id} | name={char_name} | features={json.dumps(new_char_card.features, ensure_ascii=False)}")
+            
+            if characters_created > 0:
+                log.info(f"🎭 [LLM] Total characters created: {characters_created}")
             
             save_current_story(user_id, sess)
 
-        except json.JSONDecodeError:
-            log.warning(f"⚠️ LLM did not return valid JSON. Response: {result_text}")
+        except json.JSONDecodeError as je:
+            log.warning(f"⚠️ LLM did not return valid JSON. Response: {result_text} | Error: {je}")
+            
+            # 嘗試手動解析簡單的角色列表格式
+            _try_manual_character_extraction(sess, user_id, text, result_text)
+            
         except Exception as e:
             log.error(f"💥 Failed to process LLM character extraction result: {e}")
             
     except Exception as e:
         log.error(f"❌ OpenAI character extraction failed: {e}")
+
+def _try_manual_character_extraction(sess, user_id, text, llm_response):
+    """
+    當LLM返回的JSON格式有問題時，嘗試手動提取角色名稱
+    """
+    try:
+        # 檢查是否是角色列表格式
+        if re.search(r"(主角有|角色有|登場人物)", text):
+            # 提取逗號分隔的名稱
+            names_part = re.sub(r".*?(主角有|角色有|登場人物)[：:]\s*", "", text)
+            names = [name.strip() for name in re.split(r"[，,、]", names_part) if name.strip()]
+            
+            characters_created = 0
+            for name in names:
+                if name and name not in sess["characters"]:
+                    new_char_card = CharacterCard(name=name)
+                    sess["characters"][name] = new_char_card
+                    characters_created += 1
+                    log.info(f"✨ [Manual] New character created | user={user_id} | name={name}")
+            
+            if characters_created > 0:
+                save_current_story(user_id, sess)
+                log.info(f"🎭 [Manual] Total characters created: {characters_created}")
+                
+    except Exception as e:
+        log.error(f"❌ Manual character extraction failed: {e}")
 
 def render_character_card_as_text(characters: dict) -> str:
     if not characters:
