@@ -298,7 +298,7 @@ def maybe_update_character_card(sess, user_id, text):
     """
     使用LLM來動態識別角色及其特徵，並更新角色卡。
     """
-    if not _oai_client:
+    if not _oai_client or not text.strip():
         return
     
     sysmsg = f"""
@@ -313,7 +313,9 @@ def maybe_update_character_card(sess, user_id, text):
     5. 每個 JSON 物件必須包含 `name` 和 `features` 欄位。
       - `name` 欄位必須是從句子中提取的具體名稱。
       - `features` 字典中的 key 應為英文，value 為英文或簡潔中文。
-      - 範例：`[{{ "name": "小明", "features": {{ "species": "boy", "hair_color": "black", "clothing_color": "blue", "clothing_type": "T-shirt" }} }}, {{ "name": "可可", "features": {{ "species": "fox", "color": "white" }} }}]`。
+      - 例：
+        [{{"name": "小明", "features": {{"species": "boy", "hair_color": "black", "clothing_color": "blue", "clothing_type": "T-shirt"}}}},
+         {{"name": "可可", "features": {{"species": "fox", "color": "white"}}}}]
 
     用戶輸入：{text}
     """
@@ -335,46 +337,46 @@ def maybe_update_character_card(sess, user_id, text):
                 temperature=0.3,
             )
             result_text = resp["choices"][0]["message"]["content"].strip()
-            
-        # 嘗試解析 JSON
+        
         try:
+            # 嘗試解析 JSON
             json_data = json.loads(result_text)
-            
             if not isinstance(json_data, list):
-                # 如果不是列表，把它包裝成列表以便統一處理
                 json_data = [json_data]
-            
-            for char_obj in json_data:
-                char_name = char_obj.get("name")
-                features = char_obj.get("features", {})
-                
-                if not char_name:
-                    log.warning("❌ LLM output did not contain a name in a character object.")
-                    continue
-                
-                # 檢查是否已存在該角色
-                if char_name in sess["characters"]:
-                    char_card = sess["characters"][char_name]
-                    for key, value in features.items():
-                        if char_card.update(key, value):
-                            log.info(f"🧬 [LLM] Updated character card | user={user_id} | name={char_name} | key={key} | value={value}")
-                else:
-                    # 建立新角色卡
-                    new_char_card = CharacterCard(name=char_name)
-                    for key, value in features.items():
-                        new_char_card.update(key, value)
-                    sess["characters"][char_name] = new_char_card
-                    log.info(f"✨ [LLM] New character created | user={user_id} | name={char_name} | features={json.dumps(new_char_card.features, ensure_ascii=False)}")
-            
-            save_current_story(user_id, sess)
-
+        
         except json.JSONDecodeError:
             log.warning(f"⚠️ LLM did not return valid JSON. Response: {result_text}")
-        except Exception as e:
-            log.error(f"💥 Failed to process LLM character extraction result: {e}")
-            
+            # fallback: 嘗試抓名字建立角色
+            names = re.findall(r"[A-Za-z\u4e00-\u9fff]{1,4}", result_text)
+            json_data = [{"name": n, "features": {}} for n in names[:3]]  # 最多三個角色
+        
+        # 統一處理角色更新/建立
+        for char_obj in json_data:
+            char_name = char_obj.get("name")
+            features = char_obj.get("features", {})
+    
+            if not char_name:
+                log.warning("❌ LLM output did not contain a name in a character object.")
+                continue
+    
+            if char_name in sess["characters"]:
+                char_card = sess["characters"][char_name]
+                for key, value in features.items():
+                    if char_card.update(key, value):
+                        log.info(f"🧬 [LLM] Updated character card | user={user_id} | name={char_name} | key={key} | value={value}")
+            else:
+                new_char_card = CharacterCard(name=char_name)
+                for key, value in features.items():
+                    new_char_card.update(key, value)
+                sess["characters"][char_name] = new_char_card
+                log.info(f"✨ [LLM] New character created | user={user_id} | name={char_name} | features={json.dumps(new_char_card.features, ensure_ascii=False)}")
+        
+        save_current_story(user_id, sess)
+    
     except Exception as e:
         log.error(f"❌ OpenAI character extraction failed: {e}")
+
+
 
 def render_character_card_as_text(characters: dict) -> str:
     if not characters:
