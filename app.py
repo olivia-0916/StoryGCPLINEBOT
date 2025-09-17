@@ -540,17 +540,22 @@ def _generate_story_title(paragraphs: list, characters: dict) -> str:
 # 新增：生成封面描述
 def _generate_cover_description(paragraphs: list, characters: dict) -> str:
     if not paragraphs:
-        return "一個充滿想像力的故事，有著迷人的角色。"
+        return "A colorful storybook cover with charming characters."
 
     full_story = "\n".join(paragraphs)
     char_prompts = render_character_card_as_text(characters)
 
     sysmsg = (
-        f"根據以下故事的五段內容和角色，想像一個豐富、引人入勝的故事封面，並用一句話簡潔地描述這個場景。\n"
-        f"這個描述將作為繪圖的提示，所以要包含故事的主要元素、場景和角色（請提到具體角色，而非籠統的「他們」）。\n"
+        f"你是一位專業的故事插畫設計師。請根據以下故事的五段內容和角色資訊，構思一個**故事封面**。\n"
+        f"輸出要求：\n"
+        f"1. 用 2–3 句英文描述封面圖像。\n"
+        f"2. 必須包含至少一個主要角色（用具體名稱，例如小明，不要只寫『the boy』）。\n"
+        f"3. 必須包含一個核心場景（例如森林、城堡、村莊、海洋）。\n"
+        f"4. 必須包含一個象徵性物件或關鍵元素（例如寶箱、星星、魔法門）。\n"
+        f"5. 語氣要像給插畫師的繪圖說明，不要多餘的解釋。\n"
+        f"6. 只輸出封面描述，不要加任何前後引號或標記。\n\n"
         f"故事內容：{full_story}\n"
         f"角色特徵：{char_prompts}\n"
-        f"請直接輸出場景描述，不要有任何額外文字。"
     )
     
     try:
@@ -559,7 +564,7 @@ def _generate_cover_description(paragraphs: list, characters: dict) -> str:
                 model="gpt-4o-mini",
                 messages=[{"role": "system", "content": sysmsg}],
                 temperature=0.7,
-                max_tokens=100
+                max_tokens=120
             )
             return resp.choices[0].message.content.strip()
         else:
@@ -567,12 +572,13 @@ def _generate_cover_description(paragraphs: list, characters: dict) -> str:
                 model="gpt-4o-mini",
                 messages=[{"role": "system", "content": sysmsg}],
                 temperature=0.7,
-                max_tokens=100
+                max_tokens=120
             )
             return resp["choices"][0]["message"]["content"].strip()
     except Exception as e:
         log.error("❌ OpenAI cover description generation error: %s", e)
-        return "一個充滿想像力的故事封面，有著迷人的角色。"
+        return "A whimsical storybook cover featuring the main character in a magical scene."
+
 
 
 # =============== 圖像 Prompt ===============
