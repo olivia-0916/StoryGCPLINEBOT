@@ -243,7 +243,15 @@ user_sessions = {}
 user_seeds    = {}
 
 def _ensure_session(user_id):
-    sess = user_sessions.setdefault(user_id, {"messages": [], "paras": [], "characters": {}, "story_id": None, "story_title": None})
+    # 新增 story_mode 預設值
+    sess = user_sessions.setdefault(user_id, {
+        "messages": [],
+        "paras": [],
+        "characters": {},
+        "story_id": None,
+        "story_title": None,
+        "story_mode": False   # <<< 新增：是否進入故事模式
+    })
     user_seeds.setdefault(user_id, random.randint(100000, 999999))
     if sess.get("story_id") is None:
         sess["story_id"] = f"story-{int(time.time())}-{random.randint(1000,9999)}"
@@ -298,6 +306,9 @@ def maybe_update_character_card(sess, user_id, text):
     """
     使用LLM來動態識別角色及其特徵，並更新角色卡。
     """
+    if not sess.get("story_mode", False):
+        log.info(f"🚫 Skip character update | user={user_id} | story_mode=False")
+        return
     if not _oai_client or not text.strip():
         return
     
@@ -685,7 +696,7 @@ def handle_message(event):
         # 這裡不加 return，讓它繼續執行後續邏輯
     
     if is_new_story:
-        user_sessions[user_id] = {"messages": [], "paras": [], "characters": {}, "story_id": None, "story_title": None}
+        user_sessions[user_id] = {"messages": [], "paras": [], "characters": {}, "story_id": None, "story_title": None, "story_mode": True}
         _ensure_session(user_id) # 重新初始化 session
         line_bot_api.reply_message(reply_token, TextSendMessage("太棒了！小繪已經準備好了。我們來創造一個全新的故事吧！故事的主角是誰呢？"))
         return
@@ -696,8 +707,10 @@ def handle_message(event):
         sess["messages"] = sess["messages"][-60:]
     save_chat(user_id, "user", text)
 
-    # 在每次用戶發言後，嘗試更新角色卡
-    threading.Thread(target=maybe_update_character_card, args=(sess, user_id, text), daemon=True).start()
+    # 在每次用戶發言後，只有在故事模式下才更新角色卡
+    if sess.get("story_mode", False):
+        threading.Thread(target=maybe_update_character_card, args=(sess, user_id, text), daemon=True).start()
+
 
     # 2. 處理「整理」指令
     if is_summary_request:
