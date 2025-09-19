@@ -548,11 +548,12 @@ def _generate_story_title(paragraphs: list, characters: dict) -> str:
             ]
             return random.choice(fallback_titles)
 
-# 新增：生成封面描述
+# 生成封面描述
 def _generate_cover_description(paragraphs: list, characters: dict) -> str:
     if not paragraphs:
         return "A colorful storybook cover with charming characters."
 
+    # 把段落組合成完整故事
     full_story = "\n".join(paragraphs)
     char_prompts = render_character_card_as_text(characters)
 
@@ -568,7 +569,7 @@ def _generate_cover_description(paragraphs: list, characters: dict) -> str:
         f"故事內容：{full_story}\n"
         f"角色特徵：{char_prompts}\n"
     )
-    
+
     try:
         if _openai_mode == "sdk1":
             resp = _oai_client.chat.completions.create(
