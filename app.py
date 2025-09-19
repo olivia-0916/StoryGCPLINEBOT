@@ -549,25 +549,30 @@ def _generate_story_title(paragraphs: list, characters: dict) -> str:
             return random.choice(fallback_titles)
 
 # 生成封面描述
-def _generate_cover_description(paragraphs: list, characters: dict) -> str:
+def _generate_cover_description(paragraphs: list, characters: dict, story_title: str = None) -> str:
     if not paragraphs:
         return "A colorful storybook cover with charming characters."
 
     # 把段落組合成完整故事
     full_story = "\n".join(paragraphs)
     char_prompts = render_character_card_as_text(characters)
+    title_part = f"The story is titled '{story_title}'.\n" if story_title else ""
 
+    # system prompt
     sysmsg = (
-        f"你是一位專業的故事插畫設計師。請根據以下故事的五段內容和角色資訊，構思一個**故事封面**。\n"
-        f"輸出要求：\n"
-        f"1. 用 2–3 句英文描述封面圖像。\n"
-        f"2. 必須包含至少一個主要角色（用具體名稱，例如小明，不要只寫『the boy』）。\n"
-        f"3. 必須包含一個核心場景（例如森林、城堡、村莊、海洋）。\n"
-        f"4. 必須包含一個象徵性物件或關鍵元素（例如寶箱、星星、魔法門）。\n"
-        f"5. 語氣要像給插畫師的繪圖說明，不要多餘的解釋。\n"
-        f"6. 只輸出封面描述，不要加任何前後引號或標記。\n\n"
-        f"故事內容：{full_story}\n"
-        f"角色特徵：{char_prompts}\n"
+        f"You are a professional storybook illustrator. Based on the following story and characters, "
+        f"create a vivid **storybook cover illustration prompt**.\n"
+        f"{title_part}\n"
+        f"Requirements:\n"
+        f"1. Write 2–3 sentences in English.\n"
+        f"2. Must explicitly include at least one main character by name "
+        f"({', '.join(characters.keys()) or 'the main hero'}).\n"
+        f"3. Must show a recognizable scene from the story (avoid generic castles/forests unless in the story).\n"
+        f"4. Must include one symbolic object or key element from the story.\n"
+        f"5. Style: bright, whimsical, child-friendly illustration.\n"
+        f"6. Only output the cover description, no extra explanation.\n\n"
+        f"Story content:\n{full_story}\n\n"
+        f"Character details:\n{char_prompts}\n"
     )
 
     try:
@@ -575,22 +580,21 @@ def _generate_cover_description(paragraphs: list, characters: dict) -> str:
             resp = _oai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "system", "content": sysmsg}],
-                temperature=0.7,
-                max_tokens=120
+                temperature=0.6,
+                max_tokens=150
             )
             return resp.choices[0].message.content.strip()
         else:
             resp = _oai_client.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "system", "content": sysmsg}],
-                temperature=0.7,
-                max_tokens=120
+                temperature=0.6,
+                max_tokens=150
             )
             return resp["choices"][0]["message"]["content"].strip()
     except Exception as e:
         log.error("❌ OpenAI cover description generation error: %s", e)
         return "A whimsical storybook cover featuring the main character in a magical scene."
-
 
 
 # =============== 圖像 Prompt ===============
